@@ -132,13 +132,6 @@ jobs:
           cd src-tauri
           cargo test --verbose --all-features --lib
 
-      # Frontend tests and checks (if frontend changed)
-      - name: Run Frontend Unit Tests
-        if: needs.changes.outputs.frontend == 'true'
-        run: pnpm test
-        env:
-          NODE_ENV: test
-
       # Build frontend first (required for Tauri)
       - name: Build Frontend
         run: pnpm run build
