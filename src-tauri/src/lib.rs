@@ -1,7 +1,10 @@
 use serde::Serialize;
-use std::process::{Command, Stdio};
 use std::io::{BufRead, BufReader};
-use tauri::{AppHandle, Emitter};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use tauri::{AppHandle, Emitter, State};
+
+// ===== Data Structures =====
 
 #[derive(Clone, Serialize)]
 struct DownloadProgress {
@@ -21,157 +24,302 @@ struct DownloadOptions {
     add_metadata: bool,
 }
 
-// Get the downloads directory for the current platform
+#[derive(Clone, Debug)]
+enum YtDlpCommand {
+    Direct(String),
+    PythonModule(String),
+}
+
+impl YtDlpCommand {
+    fn create_command(&self) -> Command {
+        match self {
+            YtDlpCommand::Direct(path) => Command::new(path),
+            YtDlpCommand::PythonModule(python_cmd) => {
+                let mut cmd = Command::new(python_cmd);
+                cmd.arg("-m").arg("yt_dlp");
+                cmd
+            }
+        }
+    }
+}
+
+// Application state to store yt-dlp command path
+struct AppState {
+    ytdlp_command: Arc<Mutex<Option<YtDlpCommand>>>,
+}
+
+impl AppState {
+    fn new() -> Self {
+        Self {
+            ytdlp_command: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn set_ytdlp_command(&self, cmd: YtDlpCommand) {
+        if let Ok(mut guard) = self.ytdlp_command.lock() {
+            *guard = Some(cmd);
+        }
+    }
+
+    fn get_ytdlp_command(&self) -> Option<YtDlpCommand> {
+        self.ytdlp_command.lock().ok()?.clone()
+    }
+}
+
+// ===== Utility Functions =====
+
 fn get_downloads_dir() -> Result<String, String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(target_os = "windows")]
     {
-        if let Ok(home) = std::env::var("HOME") {
-            return Ok(format!("{}/Downloads", home));
+        std::env::var("USERPROFILE")
+            .map(|profile| format!("{}\\Downloads", profile))
+            .map_err(|_| "Could not determine Windows downloads directory".to_string())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::var("HOME")
+            .map(|home| format!("{}/Downloads", home))
+            .map_err(|_| "Could not determine downloads directory".to_string())
+    }
+}
+
+fn try_command(cmd: &str, args: &[&str]) -> bool {
+    Command::new(cmd)
+        .args(args)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn find_ytdlp() -> Option<YtDlpCommand> {
+    // Try direct commands in PATH
+    let direct_commands = if cfg!(target_os = "windows") {
+        vec!["yt-dlp.exe", "yt-dlp"]
+    } else {
+        vec!["yt-dlp"]
+    };
+
+    for cmd in &direct_commands {
+        if try_command(cmd, &["--version"]) {
+            return Some(YtDlpCommand::Direct(cmd.to_string()));
+        }
+    }
+
+    // Try common installation paths
+    let common_paths = if cfg!(target_os = "windows") {
+        vec![
+            "C:\\Program Files\\yt-dlp\\yt-dlp.exe",
+            "C:\\Python3\\Scripts\\yt-dlp.exe",
+            "C:\\Python\\Scripts\\yt-dlp.exe",
+        ]
+    } else {
+        vec![
+            "/usr/local/bin/yt-dlp",
+            "/usr/bin/yt-dlp",
+            "/opt/homebrew/bin/yt-dlp",
+        ]
+    };
+
+    for path in &common_paths {
+        if try_command(path, &["--version"]) {
+            return Some(YtDlpCommand::Direct(path.to_string()));
+        }
+    }
+
+    // Try user home directory paths (Unix-like systems)
+    #[cfg(not(target_os = "windows"))]
+    if let Ok(home) = std::env::var("HOME") {
+        let home_paths = vec![
+            format!("{}/.local/bin/yt-dlp", home),
+            format!("{}/bin/yt-dlp", home),
+        ];
+        for path in home_paths {
+            if try_command(&path, &["--version"]) {
+                return Some(YtDlpCommand::Direct(path));
+            }
+        }
+    }
+
+    // Try Python module variants
+    for python_cmd in &["python3", "python", "py"] {
+        if try_command(python_cmd, &["-m", "yt_dlp", "--version"]) {
+            return Some(YtDlpCommand::PythonModule(python_cmd.to_string()));
+        }
+    }
+
+    // Try 'which' or 'where' command as last resort
+    #[cfg(not(target_os = "windows"))]
+    if let Ok(output) = Command::new("which").arg("yt-dlp").output() {
+        if output.status.success() {
+            if let Ok(path) = String::from_utf8(output.stdout) {
+                let path = path.trim();
+                if !path.is_empty() {
+                    return Some(YtDlpCommand::Direct(path.to_string()));
+                }
+            }
         }
     }
 
     #[cfg(target_os = "windows")]
-    {
-        if let Ok(userprofile) = std::env::var("USERPROFILE") {
-            return Ok(format!("{}\\Downloads", userprofile));
+    if let Ok(output) = Command::new("where").arg("yt-dlp").output() {
+        if output.status.success() {
+            if let Ok(path) = String::from_utf8(output.stdout) {
+                if let Some(first_line) = path.lines().next() {
+                    let path = first_line.trim();
+                    if !path.is_empty() {
+                        return Some(YtDlpCommand::Direct(path.to_string()));
+                    }
+                }
+            }
         }
     }
 
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(home) = std::env::var("HOME") {
-            return Ok(format!("{}/Downloads", home));
-        }
-    }
-
-    Err("Could not determine downloads directory".to_string())
+    None
 }
 
-#[tauri::command]
-async fn download_video(app: AppHandle, url: String, options: DownloadOptions) -> Result<String, String> {
-    let downloads_dir = get_downloads_dir()?;
+// ===== Tauri Commands =====
 
-    // Check if yt-dlp is installed
-    let check = Command::new("yt-dlp")
-        .arg("--version")
-        .output();
+fn emit_progress(app: &AppHandle, url: &str, progress: f32, status: String, error: Option<String>) {
+    let _ = app.emit(
+        "download-progress",
+        DownloadProgress {
+            url: url.to_string(),
+            progress,
+            status,
+            error,
+        },
+    );
+}
 
-    if check.is_err() {
-        return Err("yt-dlp is not installed. Please install it first: https://github.com/yt-dlp/yt-dlp#installation".to_string());
-    }
+fn build_ytdlp_command(
+    ytdlp_cmd: &YtDlpCommand,
+    url: &str,
+    options: &DownloadOptions,
+    downloads_dir: &str,
+) -> Command {
+    let mut cmd = ytdlp_cmd.create_command();
 
-    // Emit initial progress
-    let _ = app.emit("download-progress", DownloadProgress {
-        url: url.clone(),
-        progress: 0.0,
-        status: "Starting download...".to_string(),
-        error: None,
-    });
+    cmd.arg("-x")
+        .arg("--audio-format")
+        .arg(&options.audio_format)
+        .arg("--audio-quality")
+        .arg(&options.audio_quality)
+        .arg("-o")
+        .arg(format!("{}/{}", downloads_dir, options.output_template))
+        .arg("--newline");
 
-    // Build yt-dlp command with options
-    let mut cmd = Command::new("yt-dlp");
-
-    // Extract audio
-    cmd.arg("-x");
-
-    // Set audio format
-    cmd.arg("--audio-format");
-    cmd.arg(&options.audio_format);
-
-    // Set audio quality
-    cmd.arg("--audio-quality");
-    cmd.arg(&options.audio_quality);
-
-    // Set output template
-    cmd.arg("-o");
-    cmd.arg(format!("{}/{}", downloads_dir, options.output_template));
-
-    // Add metadata if enabled
     if options.add_metadata {
         cmd.arg("--add-metadata");
     }
 
-    // Embed thumbnail if enabled
     if options.embed_thumbnail {
         cmd.arg("--embed-thumbnail");
     }
 
-    // Add newline for easier parsing
-    cmd.arg("--newline");
+    cmd.arg(url)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-    // Add URL
-    cmd.arg(&url);
+    cmd
+}
 
-    // Set up stdio
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
+fn parse_progress_line(line: &str) -> Option<f32> {
+    if line.contains("[download]") && line.contains("%") {
+        line.split_whitespace()
+            .find(|s| s.ends_with("%"))
+            .and_then(|s| s.strip_suffix("%"))
+            .and_then(|s| s.parse::<f32>().ok())
+    } else {
+        None
+    }
+}
 
-    let mut child = cmd.spawn()
+async fn perform_download(
+    app: &AppHandle,
+    ytdlp_cmd: &YtDlpCommand,
+    url: &str,
+    options: &DownloadOptions,
+) -> Result<String, String> {
+    let downloads_dir = get_downloads_dir()?;
+
+    emit_progress(app, url, 0.0, "Starting download...".to_string(), None);
+
+    let mut cmd = build_ytdlp_command(ytdlp_cmd, url, options, &downloads_dir);
+
+    let mut child = cmd
+        .spawn()
         .map_err(|e| format!("Failed to start yt-dlp: {}", e))?;
 
-    let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("Failed to capture stdout")?;
     let reader = BufReader::new(stdout);
 
-    let mut _last_file_path = String::new();
+    let mut last_file_path = String::new();
 
-    // Parse output for progress
     for line in reader.lines().map_while(Result::ok) {
-        // Check for download progress
-        if line.contains("[download]") && line.contains("%") {
-            // Extract percentage
-            if let Some(percent_str) = line.split_whitespace()
-                .find(|s| s.ends_with("%"))
-                .and_then(|s| s.strip_suffix("%"))
-            {
-                if let Ok(percent) = percent_str.parse::<f32>() {
-                    let _ = app.emit("download-progress", DownloadProgress {
-                        url: url.clone(),
-                        progress: percent,
-                        status: format!("Downloading... {}%", percent as u32),
-                        error: None,
-                    });
-                }
-            }
+        if let Some(percent) = parse_progress_line(&line) {
+            emit_progress(
+                app,
+                url,
+                percent,
+                format!("Downloading... {}%", percent as u32),
+                None,
+            );
         }
 
-        // Extract video title
-        if line.contains("[ExtractAudio]") || line.contains("Destination:") {
+        if line.contains("Destination:") {
             if let Some(path) = line.split("Destination:").nth(1) {
-                _last_file_path = path.trim().to_string();
+                last_file_path = path.trim().to_string();
             }
         }
     }
 
-    let status = child.wait().map_err(|e| format!("Failed to wait for yt-dlp: {}", e))?;
+    let status = child
+        .wait()
+        .map_err(|e| format!("Failed to wait for yt-dlp: {}", e))?;
 
     if status.success() {
-        let _ = app.emit("download-progress", DownloadProgress {
-            url: url.clone(),
-            progress: 100.0,
-            status: "Completed".to_string(),
-            error: None,
-        });
-
-        Ok(format!("Download completed: {}", _last_file_path))
+        emit_progress(app, url, 100.0, "Completed".to_string(), None);
+        Ok(format!("Download completed: {}", last_file_path))
     } else {
         let error_msg = "Download failed".to_string();
-        let _ = app.emit("download-progress", DownloadProgress {
-            url: url.clone(),
-            progress: 0.0,
-            status: "Failed".to_string(),
-            error: Some(error_msg.clone()),
-        });
-
+        emit_progress(app, url, 0.0, "Failed".to_string(), Some(error_msg.clone()));
         Err(error_msg)
     }
 }
 
 #[tauri::command]
-async fn download_multiple_videos(app: AppHandle, urls: Vec<String>, options: DownloadOptions) -> Result<Vec<String>, String> {
+async fn download_video(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+    options: DownloadOptions,
+) -> Result<String, String> {
+    let ytdlp_cmd = state.get_ytdlp_command().ok_or_else(|| {
+        "yt-dlp is not available. Please ensure it's installed: https://github.com/yt-dlp/yt-dlp#installation".to_string()
+    })?;
+
+    perform_download(&app, &ytdlp_cmd, &url, &options).await
+}
+
+#[tauri::command]
+async fn download_multiple_videos(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    urls: Vec<String>,
+    options: DownloadOptions,
+) -> Result<Vec<String>, String> {
+    let ytdlp_cmd = state.get_ytdlp_command().ok_or_else(|| {
+        "yt-dlp is not available. Please ensure it's installed: https://github.com/yt-dlp/yt-dlp#installation".to_string()
+    })?;
+
     let mut results = Vec::new();
 
     for url in urls {
-        match download_video(app.clone(), url.clone(), options.clone()).await {
+        match perform_download(&app, &ytdlp_cmd, &url, &options).await {
             Ok(msg) => results.push(msg),
             Err(e) => results.push(format!("Error for {}: {}", url, e)),
         }
@@ -181,20 +329,32 @@ async fn download_multiple_videos(app: AppHandle, urls: Vec<String>, options: Do
 }
 
 #[tauri::command]
-fn check_ytdlp_installed() -> bool {
-    Command::new("yt-dlp")
-        .arg("--version")
-        .output()
-        .is_ok()
+fn check_ytdlp_installed(state: State<'_, AppState>) -> bool {
+    state.get_ytdlp_command().is_some()
 }
+
+// ===== Application Setup =====
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Initialize application state
+    let app_state = AppState::new();
+
+    // Search for yt-dlp at startup
+    if let Some(ytdlp_cmd) = find_ytdlp() {
+        app_state.set_ytdlp_command(ytdlp_cmd);
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .invoke_handler(tauri::generate_handler![download_video, download_multiple_videos, check_ytdlp_installed])
+        .manage(app_state)
+        .invoke_handler(tauri::generate_handler![
+            download_video,
+            download_multiple_videos,
+            check_ytdlp_installed
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -238,11 +398,12 @@ mod tests {
     }
 
     #[test]
-    fn test_check_ytdlp_installed() {
-        // This test will pass or fail depending on whether yt-dlp is installed
-        // We're testing that the function returns a boolean and doesn't panic
-        let result = check_ytdlp_installed();
-        assert!(result == true || result == false, "Should return a boolean value");
+    fn test_find_ytdlp() {
+        // This test checks that find_ytdlp runs without panicking
+        // The result depends on whether yt-dlp is installed on the system
+        let result = find_ytdlp();
+        // Test passes if it returns Some or None without panicking
+        assert!(result.is_some() || result.is_none(), "Should return an Option value");
     }
 
     #[test]
