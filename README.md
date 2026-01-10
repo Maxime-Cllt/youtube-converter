@@ -1,20 +1,25 @@
+<div align="center" style="margin-top: 20px">
+  <img src="assets/logo.png" alt="Youtube-converter" height="150px" width="150px" />
+</div>
+
 <div align="center">
   <h1>🎵 YouTube Converter</h1>
   <p><i>Convert YouTube videos to high-quality audio files with ease</i></p>
 </div>
 
 <div align="center">
-  <img src="https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white" alt="Rust" />
+    <img src="https://img.shields.io/badge/Rust-dea584?style=for-the-badge&logo=rust&logoColor=white" alt="Rust" />
   <img src="https://img.shields.io/badge/Tauri-FFC131?style=for-the-badge&logo=tauri&logoColor=white" alt="Tauri" />
   <img src="https://img.shields.io/badge/TypeScript-3178C6?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript" />
   <img src="https://img.shields.io/badge/React-61DAFB?style=for-the-badge&logo=react&logoColor=black" alt="React" />
     <img src="https://img.shields.io/badge/Version-1.0.0-7073f6?style=for-the-badge" alt="Version" />
 </div>
 
+---
 
 <div align="center" style="margin-top: 20px">
-  <img src="assets/app.png" alt="FileFlow Insert Mode" height="250px" width="500px" />
-  <img src="assets/app2.png" alt="FileFlow Download Mode" height="250px"width="250px" />
+  <img src="assets/app.png" alt="Youtube-converter" height="250px" width="500px" />
+  <img src="assets/app2.png" alt="Youtube-converter" height="250px"width="250px" />
 </div>
 
 ---
