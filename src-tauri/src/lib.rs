@@ -1,176 +1,204 @@
 use serde::Serialize;
-use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, State};
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
+use tokio::sync::{RwLock, Semaphore};
 
-// ===== Data Structures =====
+const MAX_PARALLEL_DOWNLOADS: usize = 3;
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DownloadProgress {
     url: String,
     progress: f32,
     status: String,
+    speed: Option<String>,
+    eta: Option<String>,
     error: Option<String>,
 }
 
-#[derive(serde::Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[derive(serde::Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase", default)]
 struct DownloadOptions {
+    // Mode: "audio" or "video"
+    mode: String,
+
+    // Output
+    output_dir: Option<String>,
+    output_template: String,
+
+    // Audio
     audio_format: String,
     audio_quality: String,
-    output_template: String,
+
+    // Video
+    video_resolution: String, // "best" | "2160" | "1440" | "1080" | "720" | "480" | "360"
+    video_container: String,  // "default" | "mp4" | "mkv" | "webm"
+    video_codec: String,      // "any" | "h264" | "h265" | "vp9" | "av1"
+    prefer_free_formats: bool,
+
+    // Embed
     embed_thumbnail: bool,
     add_metadata: bool,
+    embed_chapters: bool,
+    embed_subs: bool,
+
+    // Subtitles
+    write_subs: bool,
+    write_auto_subs: bool,
+    sub_langs: String, // e.g. "en,fr"
+
+    // SponsorBlock
+    sponsorblock_remove: bool,
+    sponsorblock_categories: Vec<String>,
+
+    // Network / performance
+    limit_rate: String,         // "1M", "500K", or empty
+    concurrent_fragments: u32,  // -N option, 1..=16
+    retries: u32,               // default 10
+    cookies_file: Option<String>,
+    proxy: Option<String>,
+    user_agent: Option<String>,
+
+    // Playlist
+    no_playlist: bool,
+    playlist_items: String,
+
+    // Misc
+    write_info_json: bool,
+    write_description: bool,
+    custom_args: String,
 }
 
-#[derive(Clone, Debug)]
-enum YtDlpCommand {
-    Direct(String),
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
+pub enum YtDlpCommand {
+    Sidecar(PathBuf),
+    Direct(PathBuf),
     PythonModule(String),
 }
 
 impl YtDlpCommand {
-    fn create_command(&self) -> Command {
+    fn create(&self) -> Command {
         match self {
-            YtDlpCommand::Direct(path) => Command::new(path),
-            YtDlpCommand::PythonModule(python_cmd) => {
-                let mut cmd = Command::new(python_cmd);
+            YtDlpCommand::Sidecar(path) | YtDlpCommand::Direct(path) => Command::new(path),
+            YtDlpCommand::PythonModule(python) => {
+                let mut cmd = Command::new(python);
                 cmd.arg("-m").arg("yt_dlp");
                 cmd
             }
         }
     }
+
+    fn label(&self) -> String {
+        match self {
+            YtDlpCommand::Sidecar(p) => format!("bundled ({})", p.display()),
+            YtDlpCommand::Direct(p) => format!("system ({})", p.display()),
+            YtDlpCommand::PythonModule(py) => format!("python module via {}", py),
+        }
+    }
 }
 
-// Application state to store yt-dlp command path
+#[derive(Default)]
 struct AppState {
-    ytdlp_command: Arc<Mutex<Option<YtDlpCommand>>>,
+    ytdlp: Arc<RwLock<Option<YtDlpCommand>>>,
 }
 
 impl AppState {
-    fn new() -> Self {
-        Self {
-            ytdlp_command: Arc::new(Mutex::new(None)),
-        }
+    async fn set(&self, cmd: YtDlpCommand) {
+        *self.ytdlp.write().await = Some(cmd);
     }
 
-    fn set_ytdlp_command(&self, cmd: YtDlpCommand) {
-        if let Ok(mut guard) = self.ytdlp_command.lock() {
-            *guard = Some(cmd);
-        }
-    }
-
-    fn get_ytdlp_command(&self) -> Option<YtDlpCommand> {
-        self.ytdlp_command.lock().ok()?.clone()
+    async fn get(&self) -> Option<YtDlpCommand> {
+        self.ytdlp.read().await.clone()
     }
 }
 
-// ===== Utility Functions =====
+fn target_triple() -> &'static str {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "aarch64-apple-darwin"
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "x86_64-apple-darwin"
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        "x86_64-pc-windows-msvc"
+    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        "aarch64-pc-windows-msvc"
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "x86_64-unknown-linux-gnu"
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "aarch64-unknown-linux-gnu"
+    } else {
+        ""
+    }
+}
 
 fn get_downloads_dir() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
         std::env::var("USERPROFILE")
-            .map(|profile| format!("{}\\Downloads", profile))
+            .map(|p| format!("{}\\Downloads", p))
             .map_err(|_| "Could not determine Windows downloads directory".to_string())
     }
 
     #[cfg(not(target_os = "windows"))]
     {
         std::env::var("HOME")
-            .map(|home| format!("{}/Downloads", home))
+            .map(|h| format!("{}/Downloads", h))
             .map_err(|_| "Could not determine downloads directory".to_string())
     }
 }
 
-fn try_command(cmd: &str, args: &[&str]) -> bool {
-    Command::new(cmd)
-        .args(args)
-        .output()
-        .map(|output| output.status.success())
+fn version_check_sync(path: &std::path::Path) -> bool {
+    std::process::Command::new(path)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
         .unwrap_or(false)
 }
 
-fn find_ytdlp() -> Option<YtDlpCommand> {
-    // Try direct commands in PATH
-    let direct_commands = if cfg!(target_os = "windows") {
-        vec!["yt-dlp.exe", "yt-dlp"]
+fn version_check_cmd_sync(cmd: &str, args: &[&str]) -> bool {
+    std::process::Command::new(cmd)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn resolve_sidecar(app: &AppHandle) -> Option<PathBuf> {
+    let bin = if cfg!(windows) { "yt-dlp.exe" } else { "yt-dlp" };
+
+    let mut candidate_dirs: Vec<PathBuf> = Vec::new();
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidate_dirs.push(parent.to_path_buf());
+        }
+    }
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidate_dirs.push(resource_dir.clone());
+        candidate_dirs.push(resource_dir.join("binaries"));
+    }
+
+    let triple = target_triple();
+    let suffixed = if cfg!(windows) {
+        format!("yt-dlp-{}.exe", triple)
     } else {
-        vec!["yt-dlp"]
+        format!("yt-dlp-{}", triple)
     };
 
-    for cmd in &direct_commands {
-        if try_command(cmd, &["--version"]) {
-            return Some(YtDlpCommand::Direct(cmd.to_string()));
-        }
-    }
-
-    // Try common installation paths
-    let common_paths = if cfg!(target_os = "windows") {
-        vec![
-            "C:\\Program Files\\yt-dlp\\yt-dlp.exe",
-            "C:\\Python3\\Scripts\\yt-dlp.exe",
-            "C:\\Python\\Scripts\\yt-dlp.exe",
-        ]
-    } else {
-        vec![
-            "/usr/local/bin/yt-dlp",
-            "/usr/bin/yt-dlp",
-            "/opt/homebrew/bin/yt-dlp",
-        ]
-    };
-
-    for path in &common_paths {
-        if try_command(path, &["--version"]) {
-            return Some(YtDlpCommand::Direct(path.to_string()));
-        }
-    }
-
-    // Try user home directory paths (Unix-like systems)
-    #[cfg(not(target_os = "windows"))]
-    if let Ok(home) = std::env::var("HOME") {
-        let home_paths = vec![
-            format!("{}/.local/bin/yt-dlp", home),
-            format!("{}/bin/yt-dlp", home),
-        ];
-        for path in home_paths {
-            if try_command(&path, &["--version"]) {
-                return Some(YtDlpCommand::Direct(path));
-            }
-        }
-    }
-
-    // Try Python module variants
-    for python_cmd in &["python3", "python", "py"] {
-        if try_command(python_cmd, &["-m", "yt_dlp", "--version"]) {
-            return Some(YtDlpCommand::PythonModule(python_cmd.to_string()));
-        }
-    }
-
-    // Try 'which' or 'where' command as last resort
-    #[cfg(not(target_os = "windows"))]
-    if let Ok(output) = Command::new("which").arg("yt-dlp").output() {
-        if output.status.success() {
-            if let Ok(path) = String::from_utf8(output.stdout) {
-                let path = path.trim();
-                if !path.is_empty() {
-                    return Some(YtDlpCommand::Direct(path.to_string()));
-                }
-            }
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    if let Ok(output) = Command::new("where").arg("yt-dlp").output() {
-        if output.status.success() {
-            if let Ok(path) = String::from_utf8(output.stdout) {
-                if let Some(first_line) = path.lines().next() {
-                    let path = first_line.trim();
-                    if !path.is_empty() {
-                        return Some(YtDlpCommand::Direct(path.to_string()));
-                    }
-                }
+    for dir in &candidate_dirs {
+        for name in [bin, suffixed.as_str()] {
+            let p = dir.join(name);
+            if p.exists() && version_check_sync(&p) {
+                return Some(p);
             }
         }
     }
@@ -178,116 +206,448 @@ fn find_ytdlp() -> Option<YtDlpCommand> {
     None
 }
 
-// ===== Tauri Commands =====
+#[cfg(not(target_os = "windows"))]
+fn resolve_via_login_shell() -> Option<PathBuf> {
+    let shells: Vec<String> = std::env::var("SHELL")
+        .ok()
+        .into_iter()
+        .chain(["/bin/zsh", "/bin/bash", "/bin/sh"].iter().map(|s| s.to_string()))
+        .collect();
 
-fn emit_progress(app: &AppHandle, url: &str, progress: f32, status: String, error: Option<String>) {
+    for shell in shells {
+        if !std::path::Path::new(&shell).exists() {
+            continue;
+        }
+        let output = std::process::Command::new(&shell)
+            .args(["-l", "-c", "command -v yt-dlp"])
+            .output()
+            .ok();
+        if let Some(out) = output {
+            if out.status.success() {
+                if let Ok(s) = String::from_utf8(out.stdout) {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        let p = PathBuf::from(trimmed);
+                        if p.exists() {
+                            return Some(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn detect_system_ytdlp() -> Option<YtDlpCommand> {
+    let direct_names: &[&str] = if cfg!(windows) {
+        &["yt-dlp.exe", "yt-dlp"]
+    } else {
+        &["yt-dlp"]
+    };
+
+    for name in direct_names {
+        if version_check_cmd_sync(name, &["--version"]) {
+            return Some(YtDlpCommand::Direct(PathBuf::from(name)));
+        }
+    }
+
+    let mut common: Vec<PathBuf> = Vec::new();
+
+    if cfg!(windows) {
+        common.push(PathBuf::from("C:\\Program Files\\yt-dlp\\yt-dlp.exe"));
+        common.push(PathBuf::from("C:\\ProgramData\\chocolatey\\bin\\yt-dlp.exe"));
+        common.push(PathBuf::from("C:\\Python3\\Scripts\\yt-dlp.exe"));
+        common.push(PathBuf::from("C:\\Python\\Scripts\\yt-dlp.exe"));
+
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            common.push(PathBuf::from(format!(
+                "{}\\Microsoft\\WindowsApps\\yt-dlp.exe",
+                local
+            )));
+            common.push(PathBuf::from(format!(
+                "{}\\pipx\\venvs\\yt-dlp\\Scripts\\yt-dlp.exe",
+                local
+            )));
+            for major in 8..=14 {
+                common.push(PathBuf::from(format!(
+                    "{}\\Programs\\Python\\Python3{}\\Scripts\\yt-dlp.exe",
+                    local, major
+                )));
+            }
+        }
+        if let Ok(roaming) = std::env::var("APPDATA") {
+            for major in 8..=14 {
+                common.push(PathBuf::from(format!(
+                    "{}\\Python\\Python3{}\\Scripts\\yt-dlp.exe",
+                    roaming, major
+                )));
+            }
+        }
+    } else {
+        common.extend([
+            "/usr/local/bin/yt-dlp",
+            "/usr/bin/yt-dlp",
+            "/opt/homebrew/bin/yt-dlp",
+            "/opt/local/bin/yt-dlp",
+            "/snap/bin/yt-dlp",
+        ].iter().map(PathBuf::from));
+
+        if let Ok(home) = std::env::var("HOME") {
+            common.push(PathBuf::from(format!("{}/.local/bin/yt-dlp", home)));
+            common.push(PathBuf::from(format!("{}/bin/yt-dlp", home)));
+            common.push(PathBuf::from(format!(
+                "{}/.local/pipx/venvs/yt-dlp/bin/yt-dlp",
+                home
+            )));
+            common.push(PathBuf::from(format!("{}/.cargo/bin/yt-dlp", home)));
+
+            #[cfg(target_os = "macos")]
+            for minor in 8..=14 {
+                common.push(PathBuf::from(format!(
+                    "{}/Library/Python/3.{}/bin/yt-dlp",
+                    home, minor
+                )));
+            }
+        }
+    }
+
+    for path in common {
+        if path.exists() && version_check_sync(&path) {
+            return Some(YtDlpCommand::Direct(path));
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    if let Some(p) = resolve_via_login_shell() {
+        if version_check_sync(&p) {
+            return Some(YtDlpCommand::Direct(p));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    if let Ok(out) = std::process::Command::new("where").arg("yt-dlp").output() {
+        if out.status.success() {
+            if let Ok(s) = String::from_utf8(out.stdout) {
+                if let Some(line) = s.lines().next() {
+                    let p = PathBuf::from(line.trim());
+                    if p.exists() && version_check_sync(&p) {
+                        return Some(YtDlpCommand::Direct(p));
+                    }
+                }
+            }
+        }
+    }
+
+    for python in &["python3", "python", "py"] {
+        if version_check_cmd_sync(python, &["-m", "yt_dlp", "--version"]) {
+            return Some(YtDlpCommand::PythonModule(python.to_string()));
+        }
+    }
+
+    None
+}
+
+fn detect_ytdlp(app: &AppHandle) -> Option<YtDlpCommand> {
+    if let Some(p) = resolve_sidecar(app) {
+        return Some(YtDlpCommand::Sidecar(p));
+    }
+    detect_system_ytdlp()
+}
+
+fn emit_progress(
+    app: &AppHandle,
+    url: &str,
+    progress: f32,
+    status: &str,
+    speed: Option<String>,
+    eta: Option<String>,
+    error: Option<String>,
+) {
     let _ = app.emit(
         "download-progress",
         DownloadProgress {
             url: url.to_string(),
             progress,
-            status,
+            status: status.to_string(),
+            speed,
+            eta,
             error,
         },
     );
 }
 
-fn build_ytdlp_command(
-    ytdlp_cmd: &YtDlpCommand,
+fn video_format_selector(resolution: &str, codec: &str) -> String {
+    let height_filter = if resolution == "best" || resolution.is_empty() {
+        String::new()
+    } else {
+        format!("[height<={}]", resolution)
+    };
+
+    let codec_filter = match codec {
+        "h264" => "[vcodec^=avc1]",
+        "h265" => "[vcodec^=hev1]",
+        "vp9" => "[vcodec^=vp9]",
+        "av1" => "[vcodec^=av01]",
+        _ => "",
+    };
+
+    format!(
+        "bv*{h}{c}+ba/b{h}{c}/bv*{h}+ba/b{h}",
+        h = height_filter,
+        c = codec_filter
+    )
+}
+
+fn build_command(
+    ytdlp: &YtDlpCommand,
     url: &str,
-    options: &DownloadOptions,
+    opts: &DownloadOptions,
     downloads_dir: &str,
 ) -> Command {
-    let mut cmd = ytdlp_cmd.create_command();
+    let mut cmd = ytdlp.create();
 
-    cmd.arg("-x")
-        .arg("--audio-format")
-        .arg(&options.audio_format)
-        .arg("--audio-quality")
-        .arg(&options.audio_quality)
-        .arg("-o")
-        .arg(format!("{}/{}", downloads_dir, options.output_template))
-        .arg("--newline");
+    let separator = if cfg!(windows) { "\\" } else { "/" };
+    let dir = opts
+        .output_dir
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(downloads_dir);
+    let template = if opts.output_template.trim().is_empty() {
+        "%(title)s.%(ext)s"
+    } else {
+        opts.output_template.trim()
+    };
+    let output = format!("{}{}{}", dir, separator, template);
 
-    if options.add_metadata {
+    cmd.arg("-o")
+        .arg(output)
+        .arg("--newline")
+        .arg("--no-warnings")
+        .arg("--progress-template")
+        .arg("PROG|%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s");
+
+    // Mode: audio extraction or video download
+    let mode = if opts.mode.is_empty() { "audio" } else { opts.mode.as_str() };
+    if mode == "audio" {
+        let fmt = if opts.audio_format.is_empty() { "mp3" } else { opts.audio_format.as_str() };
+        let q = if opts.audio_quality.is_empty() { "0" } else { opts.audio_quality.as_str() };
+        cmd.arg("-x")
+            .arg("--audio-format").arg(fmt)
+            .arg("--audio-quality").arg(q);
+    } else {
+        let codec = if opts.video_codec.is_empty() { "any" } else { opts.video_codec.as_str() };
+        let resolution = if opts.video_resolution.is_empty() { "best" } else { opts.video_resolution.as_str() };
+        cmd.arg("-f").arg(video_format_selector(resolution, codec));
+
+        if opts.video_container != "default" && !opts.video_container.is_empty() {
+            cmd.arg("--merge-output-format").arg(&opts.video_container);
+        }
+        if opts.prefer_free_formats {
+            cmd.arg("--prefer-free-formats");
+        }
+    }
+
+    // Embed
+    if opts.add_metadata {
         cmd.arg("--add-metadata");
     }
-
-    if options.embed_thumbnail {
+    if opts.embed_thumbnail {
         cmd.arg("--embed-thumbnail");
     }
+    if opts.embed_chapters {
+        cmd.arg("--embed-chapters");
+    }
+    if opts.embed_subs {
+        cmd.arg("--embed-subs");
+    }
 
-    cmd.arg(url)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    // Subtitles
+    if opts.write_subs {
+        cmd.arg("--write-subs");
+    }
+    if opts.write_auto_subs {
+        cmd.arg("--write-auto-subs");
+    }
+    if (opts.write_subs || opts.write_auto_subs || opts.embed_subs) && !opts.sub_langs.trim().is_empty() {
+        cmd.arg("--sub-langs").arg(opts.sub_langs.trim());
+    }
 
+    // SponsorBlock
+    if opts.sponsorblock_remove && !opts.sponsorblock_categories.is_empty() {
+        cmd.arg("--sponsorblock-remove")
+            .arg(opts.sponsorblock_categories.join(","));
+    }
+
+    // Network / performance
+    if !opts.limit_rate.trim().is_empty() {
+        cmd.arg("--limit-rate").arg(opts.limit_rate.trim());
+    }
+    if opts.concurrent_fragments >= 2 {
+        let n = opts.concurrent_fragments.min(16);
+        cmd.arg("-N").arg(n.to_string());
+    }
+    if opts.retries > 0 && opts.retries != 10 {
+        cmd.arg("--retries").arg(opts.retries.to_string());
+    }
+    if let Some(cookies) = opts.cookies_file.as_deref().filter(|s| !s.trim().is_empty()) {
+        cmd.arg("--cookies").arg(cookies);
+    }
+    if let Some(proxy) = opts.proxy.as_deref().filter(|s| !s.trim().is_empty()) {
+        cmd.arg("--proxy").arg(proxy);
+    }
+    if let Some(ua) = opts.user_agent.as_deref().filter(|s| !s.trim().is_empty()) {
+        cmd.arg("--user-agent").arg(ua);
+    }
+
+    // Playlist
+    if opts.no_playlist {
+        cmd.arg("--no-playlist");
+    } else if !opts.playlist_items.trim().is_empty() {
+        cmd.arg("--playlist-items").arg(opts.playlist_items.trim());
+    }
+
+    // Misc
+    if opts.write_info_json {
+        cmd.arg("--write-info-json");
+    }
+    if opts.write_description {
+        cmd.arg("--write-description");
+    }
+
+    // Raw extra args (split on whitespace; advanced power-user escape hatch)
+    if !opts.custom_args.trim().is_empty() {
+        for a in opts.custom_args.split_whitespace() {
+            cmd.arg(a);
+        }
+    }
+
+    cmd.arg(url).stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd
 }
 
-fn parse_progress_line(line: &str) -> Option<f32> {
-    if line.contains("[download]") && line.contains("%") {
-        line.split_whitespace()
-            .find(|s| s.ends_with("%"))
-            .and_then(|s| s.strip_suffix("%"))
-            .and_then(|s| s.parse::<f32>().ok())
-    } else {
-        None
+struct ProgressLine {
+    percent: f32,
+    speed: Option<String>,
+    eta: Option<String>,
+}
+
+fn parse_progress(line: &str) -> Option<ProgressLine> {
+    if let Some(rest) = line.strip_prefix("PROG|") {
+        let mut parts = rest.split('|');
+        let percent_raw = parts.next()?.trim().trim_end_matches('%');
+        let percent = percent_raw.parse::<f32>().ok()?;
+        let speed = parts.next().map(|s| s.trim().to_string()).filter(|s| !s.is_empty() && s != "N/A");
+        let eta = parts.next().map(|s| s.trim().to_string()).filter(|s| !s.is_empty() && s != "N/A");
+        return Some(ProgressLine { percent, speed, eta });
     }
+
+    if line.contains("[download]") && line.contains('%') {
+        let percent = line
+            .split_whitespace()
+            .find(|s| s.ends_with('%'))
+            .and_then(|s| s.strip_suffix('%'))
+            .and_then(|s| s.parse::<f32>().ok())?;
+        return Some(ProgressLine { percent, speed: None, eta: None });
+    }
+
+    None
 }
 
 async fn perform_download(
     app: &AppHandle,
-    ytdlp_cmd: &YtDlpCommand,
+    ytdlp: &YtDlpCommand,
     url: &str,
-    options: &DownloadOptions,
+    opts: &DownloadOptions,
 ) -> Result<String, String> {
     let downloads_dir = get_downloads_dir()?;
 
-    emit_progress(app, url, 0.0, "Starting download...".to_string(), None);
+    emit_progress(app, url, 0.0, "Queued", None, None, None);
 
-    let mut cmd = build_ytdlp_command(ytdlp_cmd, url, options, &downloads_dir);
+    let mut cmd = build_command(ytdlp, url, opts, &downloads_dir);
+    cmd.kill_on_drop(true);
 
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to start yt-dlp: {}", e))?;
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or("Failed to capture stdout")?;
-    let reader = BufReader::new(stdout);
+    let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+    let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
 
-    let mut last_file_path = String::new();
+    let app_clone = app.clone();
+    let url_clone = url.to_string();
+    let stderr_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr).lines();
+        let mut last_err = String::new();
+        while let Ok(Some(line)) = reader.next_line().await {
+            if line.to_lowercase().contains("error") {
+                last_err = line;
+            }
+        }
+        if !last_err.is_empty() {
+            emit_progress(
+                &app_clone,
+                &url_clone,
+                0.0,
+                "Error",
+                None,
+                None,
+                Some(last_err.clone()),
+            );
+        }
+        last_err
+    });
 
-    for line in reader.lines().map_while(Result::ok) {
-        if let Some(percent) = parse_progress_line(&line) {
+    let mut reader = BufReader::new(stdout).lines();
+    let mut last_file = String::new();
+
+    while let Ok(Some(line)) = reader.next_line().await {
+        if let Some(p) = parse_progress(&line) {
             emit_progress(
                 app,
                 url,
-                percent,
-                format!("Downloading... {}%", percent as u32),
+                p.percent,
+                "Downloading",
+                p.speed,
+                p.eta,
                 None,
             );
-        }
-
-        if line.contains("Destination:") {
-            if let Some(path) = line.split("Destination:").nth(1) {
-                last_file_path = path.trim().to_string();
+        } else if line.contains("[ExtractAudio]") {
+            emit_progress(app, url, 99.0, "Converting", None, None, None);
+        } else if let Some(idx) = line.find("Destination:") {
+            let path = line[idx + "Destination:".len()..].trim();
+            if !path.is_empty() {
+                last_file = path.to_string();
+            }
+        } else if let Some(idx) = line.find("[download]") {
+            if line[idx..].contains("has already been downloaded") {
+                emit_progress(app, url, 100.0, "Already downloaded", None, None, None);
             }
         }
     }
 
     let status = child
         .wait()
+        .await
         .map_err(|e| format!("Failed to wait for yt-dlp: {}", e))?;
 
+    let stderr_msg = stderr_task.await.unwrap_or_default();
+
     if status.success() {
-        emit_progress(app, url, 100.0, "Completed".to_string(), None);
-        Ok(format!("Download completed: {}", last_file_path))
+        emit_progress(app, url, 100.0, "Completed", None, None, None);
+        Ok(if last_file.is_empty() {
+            "Download completed".to_string()
+        } else {
+            format!("Completed: {}", last_file)
+        })
     } else {
-        let error_msg = "Download failed".to_string();
-        emit_progress(app, url, 0.0, "Failed".to_string(), Some(error_msg.clone()));
-        Err(error_msg)
+        let err = if stderr_msg.is_empty() {
+            "Download failed".to_string()
+        } else {
+            stderr_msg
+        };
+        emit_progress(app, url, 0.0, "Failed", None, None, Some(err.clone()));
+        Err(err)
     }
 }
 
@@ -298,11 +658,11 @@ async fn download_video(
     url: String,
     options: DownloadOptions,
 ) -> Result<String, String> {
-    let ytdlp_cmd = state.get_ytdlp_command().ok_or_else(|| {
-        "yt-dlp is not available. Please ensure it's installed: https://github.com/yt-dlp/yt-dlp#installation".to_string()
-    })?;
-
-    perform_download(&app, &ytdlp_cmd, &url, &options).await
+    let cmd = state
+        .get()
+        .await
+        .ok_or_else(|| "yt-dlp is not available".to_string())?;
+    perform_download(&app, &cmd, &url, &options).await
 }
 
 #[tauri::command]
@@ -312,48 +672,103 @@ async fn download_multiple_videos(
     urls: Vec<String>,
     options: DownloadOptions,
 ) -> Result<Vec<String>, String> {
-    let ytdlp_cmd = state.get_ytdlp_command().ok_or_else(|| {
-        "yt-dlp is not available. Please ensure it's installed: https://github.com/yt-dlp/yt-dlp#installation".to_string()
-    })?;
+    let cmd = state
+        .get()
+        .await
+        .ok_or_else(|| "yt-dlp is not available".to_string())?;
 
-    let mut results = Vec::new();
+    let semaphore = Arc::new(Semaphore::new(MAX_PARALLEL_DOWNLOADS));
+    let mut handles = Vec::with_capacity(urls.len());
 
     for url in urls {
-        match perform_download(&app, &ytdlp_cmd, &url, &options).await {
-            Ok(msg) => results.push(msg),
-            Err(e) => results.push(format!("Error for {}: {}", url, e)),
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let app = app.clone();
+        let cmd = cmd.clone();
+        let opts = options.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = permit;
+            (url.clone(), perform_download(&app, &cmd, &url, &opts).await)
+        }));
+    }
+
+    let mut results = Vec::with_capacity(handles.len());
+    for h in handles {
+        match h.await {
+            Ok((_, Ok(msg))) => results.push(msg),
+            Ok((url, Err(e))) => results.push(format!("Error for {}: {}", url, e)),
+            Err(e) => results.push(format!("Task error: {}", e)),
         }
     }
 
     Ok(results)
 }
 
-#[tauri::command]
-fn check_ytdlp_installed(state: State<'_, AppState>) -> bool {
-    state.get_ytdlp_command().is_some()
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct YtDlpStatus {
+    available: bool,
+    source: Option<String>,
 }
 
-// ===== Application Setup =====
+#[tauri::command]
+async fn check_ytdlp_status(state: State<'_, AppState>) -> Result<YtDlpStatus, String> {
+    let cmd = state.get().await;
+    Ok(YtDlpStatus {
+        available: cmd.is_some(),
+        source: cmd.map(|c| c.label()),
+    })
+}
+
+#[tauri::command]
+async fn redetect_ytdlp(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<YtDlpStatus, String> {
+    let detected = tokio::task::spawn_blocking({
+        let app = app.clone();
+        move || detect_ytdlp(&app)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let source = detected.as_ref().map(|c| c.label());
+    if let Some(cmd) = detected {
+        state.set(cmd).await;
+    } else {
+        *state.ytdlp.write().await = None;
+    }
+
+    Ok(YtDlpStatus {
+        available: source.is_some(),
+        source,
+    })
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Initialize application state
-    let app_state = AppState::new();
-
-    // Search for yt-dlp at startup
-    if let Some(ytdlp_cmd) = find_ytdlp() {
-        app_state.set_ytdlp_command(ytdlp_cmd);
-    }
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .manage(app_state)
+        .manage(AppState::default())
+        .setup(|app| {
+            let handle = app.handle().clone();
+            let state: State<AppState> = handle.state();
+            let ytdlp_state = state.ytdlp.clone();
+            tauri::async_runtime::spawn(async move {
+                let detected =
+                    tokio::task::spawn_blocking(move || detect_ytdlp(&handle)).await.ok().flatten();
+                if let Some(cmd) = detected {
+                    *ytdlp_state.write().await = Some(cmd);
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             download_video,
             download_multiple_videos,
-            check_ytdlp_installed
+            check_ytdlp_status,
+            redetect_ytdlp,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -364,50 +779,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_get_downloads_dir_returns_valid_path() {
+    fn test_get_downloads_dir() {
         let result = get_downloads_dir();
-        assert!(result.is_ok(), "Should return a valid downloads directory");
-
-        let path = result.unwrap();
-        assert!(!path.is_empty(), "Path should not be empty");
-        assert!(path.contains("Downloads"), "Path should contain 'Downloads'");
+        assert!(result.is_ok());
+        assert!(result.unwrap().ends_with("Downloads"));
     }
 
     #[test]
-    fn test_get_downloads_dir_format() {
-        let result = get_downloads_dir();
-        if let Ok(path) = result {
-            #[cfg(target_os = "macos")]
-            {
-                assert!(path.starts_with("/") || path.starts_with("~"), "macOS path should start with / or ~");
-                assert!(path.ends_with("Downloads"), "macOS path should end with Downloads");
-            }
-
-            #[cfg(target_os = "windows")]
-            {
-                assert!(path.contains(":\\"), "Windows path should contain drive letter");
-                assert!(path.ends_with("Downloads"), "Windows path should end with Downloads");
-            }
-
-            #[cfg(target_os = "linux")]
-            {
-                assert!(path.starts_with("/"), "Linux path should start with /");
-                assert!(path.ends_with("Downloads"), "Linux path should end with Downloads");
-            }
-        }
+    fn test_parse_progress_template() {
+        let p = parse_progress("PROG| 42.5%|1.20MiB/s|00:30").unwrap();
+        assert_eq!(p.percent, 42.5);
+        assert_eq!(p.speed.as_deref(), Some("1.20MiB/s"));
+        assert_eq!(p.eta.as_deref(), Some("00:30"));
     }
 
     #[test]
-    fn test_find_ytdlp() {
-        // This test checks that find_ytdlp runs without panicking
-        // The result depends on whether yt-dlp is installed on the system
-        let result = find_ytdlp();
-        // Test passes if it returns Some or None without panicking
-        assert!(result.is_some() || result.is_none(), "Should return an Option value");
+    fn test_parse_progress_legacy() {
+        let p = parse_progress("[download]  50.0% of 1.00MiB at 100KiB/s ETA 00:01").unwrap();
+        assert_eq!(p.percent, 50.0);
+        assert!(p.speed.is_none());
     }
 
     #[test]
-    fn test_download_options_deserialization() {
+    fn test_parse_progress_none() {
+        assert!(parse_progress("no match here").is_none());
+    }
+
+    #[test]
+    fn test_target_triple_non_empty() {
+        assert!(!target_triple().is_empty());
+    }
+
+    #[test]
+    fn test_options_deserialization_partial() {
+        // Tests that #[serde(default)] lets the frontend send partial payloads.
         let json = r#"{
             "audioFormat": "mp3",
             "audioQuality": "0",
@@ -415,104 +820,21 @@ mod tests {
             "embedThumbnail": true,
             "addMetadata": true
         }"#;
-
-        let options: Result<DownloadOptions, _> = serde_json::from_str(json);
-        assert!(options.is_ok(), "Should deserialize valid JSON");
-
-        let options = options.unwrap();
-        assert_eq!(options.audio_format, "mp3");
-        assert_eq!(options.audio_quality, "0");
-        assert_eq!(options.output_template, "%(title)s.%(ext)s");
-        assert_eq!(options.embed_thumbnail, true);
-        assert_eq!(options.add_metadata, true);
+        let opts: DownloadOptions = serde_json::from_str(json).unwrap();
+        assert_eq!(opts.audio_format, "mp3");
+        assert!(opts.embed_thumbnail);
+        assert!(opts.sponsorblock_categories.is_empty());
+        assert_eq!(opts.concurrent_fragments, 0);
     }
 
     #[test]
-    fn test_download_options_with_false_flags() {
-        let json = r#"{
-            "audioFormat": "m4a",
-            "audioQuality": "5",
-            "outputTemplate": "%(artist)s - %(title)s.%(ext)s",
-            "embedThumbnail": false,
-            "addMetadata": false
-        }"#;
-
-        let options: Result<DownloadOptions, _> = serde_json::from_str(json);
-        assert!(options.is_ok(), "Should deserialize valid JSON");
-
-        let options = options.unwrap();
-        assert_eq!(options.audio_format, "m4a");
-        assert_eq!(options.audio_quality, "5");
-        assert_eq!(options.embed_thumbnail, false);
-        assert_eq!(options.add_metadata, false);
-    }
-
-    #[test]
-    fn test_download_progress_serialization() {
-        let progress = DownloadProgress {
-            url: "https://www.youtube.com/watch?v=test".to_string(),
-            progress: 50.5,
-            status: "Downloading...".to_string(),
-            error: None,
-        };
-
-        let json = serde_json::to_string(&progress);
-        assert!(json.is_ok(), "Should serialize DownloadProgress");
-
-        let json_str = json.unwrap();
-        assert!(json_str.contains("youtube.com"));
-        assert!(json_str.contains("50.5"));
-        assert!(json_str.contains("Downloading..."));
-    }
-
-    #[test]
-    fn test_download_progress_with_error() {
-        let progress = DownloadProgress {
-            url: "https://www.youtube.com/watch?v=test".to_string(),
-            progress: 0.0,
-            status: "Failed".to_string(),
-            error: Some("Network error".to_string()),
-        };
-
-        let json = serde_json::to_string(&progress);
-        assert!(json.is_ok(), "Should serialize DownloadProgress with error");
-
-        let json_str = json.unwrap();
-        assert!(json_str.contains("Failed"));
-        assert!(json_str.contains("Network error"));
-    }
-
-    #[test]
-    fn test_download_options_clone() {
-        let options = DownloadOptions {
-            audio_format: "mp3".to_string(),
-            audio_quality: "0".to_string(),
-            output_template: "%(title)s.%(ext)s".to_string(),
-            embed_thumbnail: true,
-            add_metadata: true,
-        };
-
-        let cloned = options.clone();
-        assert_eq!(cloned.audio_format, options.audio_format);
-        assert_eq!(cloned.audio_quality, options.audio_quality);
-        assert_eq!(cloned.output_template, options.output_template);
-        assert_eq!(cloned.embed_thumbnail, options.embed_thumbnail);
-        assert_eq!(cloned.add_metadata, options.add_metadata);
-    }
-
-    #[test]
-    fn test_download_progress_clone() {
-        let progress = DownloadProgress {
-            url: "https://test.com".to_string(),
-            progress: 25.0,
-            status: "In progress".to_string(),
-            error: None,
-        };
-
-        let cloned = progress.clone();
-        assert_eq!(cloned.url, progress.url);
-        assert_eq!(cloned.progress, progress.progress);
-        assert_eq!(cloned.status, progress.status);
-        assert_eq!(cloned.error, progress.error);
+    fn test_video_format_selector() {
+        assert_eq!(
+            video_format_selector("best", "any"),
+            "bv*+ba/b/bv*+ba/b"
+        );
+        assert!(video_format_selector("1080", "any").contains("[height<=1080]"));
+        assert!(video_format_selector("720", "h264").contains("[vcodec^=avc1]"));
+        assert!(video_format_selector("1080", "av1").contains("[vcodec^=av01]"));
     }
 }

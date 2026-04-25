@@ -1,0 +1,2 @@
+# yt-dlp binaries go here. Run scripts/fetch-ytdlp.sh (or .ps1) to populate.
+# Files committed in CI builds are produced from upstream yt-dlp releases.

@@ -1,33 +1,35 @@
 {
-  "name": "--",
+  "name": "youtube-converter",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.3.0",
   "type": "module",
+  "packageManager": "bun@1.1.42",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "svelte-check --tsconfig ./tsconfig.json && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "tauri": "tauri",
+    "fetch-ytdlp": "bash scripts/fetch-ytdlp.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/plugin-dialog": "^2.7.0",
     "@tauri-apps/plugin-opener": "^2.5.3",
-    "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "lucide-react": "^0.562.0",
-    "react": "^19.2.5",
-    "react-dom": "^19.2.5",
+    "lucide-svelte": "^0.460.0",
     "tailwind-merge": "^3.5.0"
   },
   "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
     "@tauri-apps/cli": "^2.10.1",
-    "@types/node": "^25.6.0",
-    "@types/react": "^19.2.14",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^5.2.0",
+    "@types/bun": "^1.1.14",
     "autoprefixer": "^10.5.0",
     "postcss": "^8.5.10",
+    "svelte": "^5.20.0",
+    "svelte-check": "^4.1.4",
     "tailwindcss": "^3.4.19",
+    "tslib": "^2.8.1",
     "typescript": "~5.8.3",
     "vite": "^6.4.2"
   }

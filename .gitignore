@@ -6,11 +6,15 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+bun-debug.log*
 
 node_modules
 dist
 dist-ssr
 *.local
+
+# Bundled yt-dlp binaries (fetched via scripts/fetch-ytdlp.{sh,ps1})
+src-tauri/binaries/yt-dlp*
 
 # Editor directories and files
 .vscode/*
