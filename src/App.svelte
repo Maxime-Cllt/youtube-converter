@@ -8,6 +8,7 @@
     Download,
     X,
     Music,
+    FileVideo,
     Loader2,
     AlertCircle,
     Settings,
@@ -27,11 +28,8 @@
   import CardDescription from "$lib/components/ui/CardDescription.svelte";
   import CardContent from "$lib/components/ui/CardContent.svelte";
   import Input from "$lib/components/ui/Input.svelte";
-  import Label from "$lib/components/ui/Label.svelte";
   import Progress from "$lib/components/ui/Progress.svelte";
-  import Select from "$lib/components/ui/Select.svelte";
-  import Switch from "$lib/components/ui/Switch.svelte";
-  import Dialog from "$lib/components/ui/Dialog.svelte";
+  import SettingsDialog from "$lib/components/SettingsDialog.svelte";
 
   import { options } from "$lib/stores/options.svelte";
   import { isValidYoutubeUrl, thumbnailFor } from "$lib/utils/youtube";
@@ -232,7 +230,11 @@
           <div
             class="relative rounded-2xl bg-gradient-to-br from-red-500 to-pink-600 p-3 shadow-xl shadow-red-500/30"
           >
-            <Music class="h-7 w-7 text-white" />
+            {#if options.current.mode === "audio"}
+              <Music class="h-7 w-7 text-white" />
+            {:else}
+              <FileVideo class="h-7 w-7 text-white" />
+            {/if}
           </div>
         </div>
         <div>
@@ -243,7 +245,16 @@
               YouTube Converter
             </span>
           </h1>
-          <p class="text-sm text-gray-400 mt-1.5">Extrait l'audio de vidéos YouTube en MP3 / M4A / FLAC</p>
+          <p class="text-sm text-gray-400 mt-1.5">
+            {#if options.current.mode === "audio"}
+              Extrait l'audio en {options.current.audioFormat.toUpperCase()}
+            {:else}
+              Télécharge la vidéo {options.current.videoResolution === "best"
+                ? "(meilleure qualité)"
+                : `jusqu'à ${options.current.videoResolution}p`}
+            {/if}
+            · propulsé par yt-dlp
+          </p>
         </div>
       </div>
 
@@ -526,7 +537,12 @@
 
     <!-- Footer -->
     <div class="text-center space-y-1.5 text-xs text-gray-500 pt-4 pb-12">
-      <p>Les fichiers sont enregistrés dans ton dossier <span class="font-medium text-gray-400">Téléchargements</span></p>
+      <p>
+        Sortie :
+        <span class="font-medium text-gray-400 break-all">
+          {options.current.outputDir || "~/Downloads"}
+        </span>
+      </p>
       {#if !ytdlpStatus.available && !detecting}
         <p class="text-red-400 font-medium flex items-center justify-center gap-1.5">
           <AlertCircle class="h-3.5 w-3.5" />
@@ -556,113 +572,5 @@
   {/if}
 
   <!-- Settings dialog -->
-  <Dialog open={settingsOpen} onClose={() => (settingsOpen = false)}>
-    {#snippet title()}
-      <Settings class="h-6 w-6 text-red-500" />
-      Paramètres
-    {/snippet}
-    {#snippet description()}
-      Personnalise tes téléchargements (qualité, format, métadonnées)
-    {/snippet}
-    {#snippet children()}
-      <div class="space-y-6">
-        <div class="grid grid-cols-2 gap-5">
-          <div class="space-y-2">
-            <Label for="format">{#snippet children()}Format audio{/snippet}</Label>
-            <Select
-              id="format"
-              value={options.current.audioFormat}
-              onchange={(e: Event) =>
-                options.update({ audioFormat: (e.currentTarget as HTMLSelectElement).value })}
-              options={[
-                { value: "mp3", label: "MP3" },
-                { value: "m4a", label: "M4A (AAC)" },
-                { value: "opus", label: "Opus" },
-                { value: "vorbis", label: "Vorbis" },
-                { value: "wav", label: "WAV (sans perte)" },
-                { value: "flac", label: "FLAC (sans perte)" },
-              ]}
-            />
-          </div>
-
-          <div class="space-y-2">
-            <Label for="quality">{#snippet children()}Qualité{/snippet}</Label>
-            <Select
-              id="quality"
-              value={options.current.audioQuality}
-              onchange={(e: Event) =>
-                options.update({ audioQuality: (e.currentTarget as HTMLSelectElement).value })}
-              options={[
-                { value: "0", label: "Maximale (320 kbps)" },
-                { value: "2", label: "Haute (256 kbps)" },
-                { value: "5", label: "Moyenne (192 kbps)" },
-                { value: "7", label: "Basse (128 kbps)" },
-                { value: "9", label: "Minimale (64 kbps)" },
-              ]}
-            />
-          </div>
-        </div>
-
-        <div class="space-y-2">
-          <Label for="template">{#snippet children()}Modèle de nom de fichier{/snippet}</Label>
-          <Input
-            id="template"
-            value={options.current.outputTemplate}
-            oninput={(e: Event) =>
-              options.update({
-                outputTemplate: (e.currentTarget as HTMLInputElement).value,
-              })}
-            placeholder="%(title)s.%(ext)s"
-          />
-          <p class="text-xs text-gray-500">
-            Variables yt-dlp : <code class="px-1 py-0.5 rounded bg-white/10">%(title)s</code>,
-            <code class="px-1 py-0.5 rounded bg-white/10">%(uploader)s</code>,
-            <code class="px-1 py-0.5 rounded bg-white/10">%(ext)s</code>
-          </p>
-        </div>
-
-        <div class="space-y-3 pt-3 border-t border-white/10">
-          <div class="flex items-center justify-between">
-            <div class="space-y-0.5">
-              <Label for="thumb">{#snippet children()}Intégrer la miniature{/snippet}</Label>
-              <p class="text-xs text-gray-500">Embed la cover dans le fichier audio</p>
-            </div>
-            <Switch
-              id="thumb"
-              aria-label="Intégrer la miniature"
-              checked={options.current.embedThumbnail}
-              onCheckedChange={(v) => options.update({ embedThumbnail: v })}
-            />
-          </div>
-          <div class="flex items-center justify-between">
-            <div class="space-y-0.5">
-              <Label for="meta">{#snippet children()}Ajouter les métadonnées{/snippet}</Label>
-              <p class="text-xs text-gray-500">Titre, artiste, album dans les tags ID3</p>
-            </div>
-            <Switch
-              id="meta"
-              aria-label="Ajouter les métadonnées"
-              checked={options.current.addMetadata}
-              onCheckedChange={(v) => options.update({ addMetadata: v })}
-            />
-          </div>
-        </div>
-
-        {#if ytdlpStatus.source}
-          <div class="pt-3 border-t border-white/10">
-            <p class="text-xs text-gray-500">
-              <span class="font-semibold text-gray-400">yt-dlp :</span>
-              {ytdlpStatus.source}
-            </p>
-          </div>
-        {/if}
-      </div>
-
-      <div class="flex justify-end gap-3 pt-6 mt-6 border-t border-white/10">
-        <Button variant="outline" onclick={() => (settingsOpen = false)}>
-          {#snippet children()}Fermer{/snippet}
-        </Button>
-      </div>
-    {/snippet}
-  </Dialog>
+  <SettingsDialog open={settingsOpen} onClose={() => (settingsOpen = false)} {ytdlpStatus} />
 </div>
