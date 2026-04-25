@@ -83,4 +83,6 @@ export interface DownloadOptions {
 export interface YtDlpStatus {
   available: boolean;
   source?: string | null;
+  ffmpegAvailable: boolean;
+  ffmpegSource?: string | null;
 }

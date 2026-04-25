@@ -102,18 +102,45 @@ impl YtDlpCommand {
     }
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
+pub enum FfmpegLocation {
+    /// ffmpeg is available on PATH; no `--ffmpeg-location` needed.
+    SystemPath,
+    /// Resolved to a specific directory (system-detected absolute path or sidecar).
+    Dir(PathBuf),
+}
+
+impl FfmpegLocation {
+    fn label(&self) -> String {
+        match self {
+            FfmpegLocation::SystemPath => "system PATH".to_string(),
+            FfmpegLocation::Dir(p) => p.display().to_string(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct AppState {
     ytdlp: Arc<RwLock<Option<YtDlpCommand>>>,
+    ffmpeg: Arc<RwLock<Option<FfmpegLocation>>>,
 }
 
 impl AppState {
-    async fn set(&self, cmd: YtDlpCommand) {
+    async fn set_ytdlp(&self, cmd: YtDlpCommand) {
         *self.ytdlp.write().await = Some(cmd);
     }
 
-    async fn get(&self) -> Option<YtDlpCommand> {
+    async fn get_ytdlp(&self) -> Option<YtDlpCommand> {
         self.ytdlp.read().await.clone()
+    }
+
+    async fn set_ffmpeg(&self, loc: FfmpegLocation) {
+        *self.ffmpeg.write().await = Some(loc);
+    }
+
+    async fn get_ffmpeg(&self) -> Option<FfmpegLocation> {
+        self.ffmpeg.read().await.clone()
     }
 }
 
@@ -171,55 +198,63 @@ fn version_check_cmd_sync(cmd: &str, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-fn resolve_sidecar(app: &AppHandle) -> Option<PathBuf> {
-    let bin = if cfg!(windows) { "yt-dlp.exe" } else { "yt-dlp" };
-
-    let mut candidate_dirs: Vec<PathBuf> = Vec::new();
-
+fn sidecar_candidate_dirs(app: &AppHandle) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
-            candidate_dirs.push(parent.to_path_buf());
+            dirs.push(parent.to_path_buf());
         }
     }
-
     if let Ok(resource_dir) = app.path().resource_dir() {
-        candidate_dirs.push(resource_dir.clone());
-        candidate_dirs.push(resource_dir.join("binaries"));
+        dirs.push(resource_dir.clone());
+        dirs.push(resource_dir.join("binaries"));
     }
+    dirs
+}
 
+fn resolve_named_sidecar(app: &AppHandle, name: &str) -> Option<PathBuf> {
     let triple = target_triple();
-    let suffixed = if cfg!(windows) {
-        format!("yt-dlp-{}.exe", triple)
+    let plain = if cfg!(windows) {
+        format!("{}.exe", name)
     } else {
-        format!("yt-dlp-{}", triple)
+        name.to_string()
+    };
+    let suffixed = if cfg!(windows) {
+        format!("{}-{}.exe", name, triple)
+    } else {
+        format!("{}-{}", name, triple)
     };
 
-    for dir in &candidate_dirs {
-        for name in [bin, suffixed.as_str()] {
-            let p = dir.join(name);
+    for dir in sidecar_candidate_dirs(app) {
+        for variant in [plain.as_str(), suffixed.as_str()] {
+            let p = dir.join(variant);
             if p.exists() && version_check_sync(&p) {
                 return Some(p);
             }
         }
     }
-
     None
 }
 
+fn resolve_sidecar(app: &AppHandle) -> Option<PathBuf> {
+    resolve_named_sidecar(app, "yt-dlp")
+}
+
 #[cfg(not(target_os = "windows"))]
-fn resolve_via_login_shell() -> Option<PathBuf> {
+fn resolve_via_login_shell(cmd: &str) -> Option<PathBuf> {
     let shells: Vec<String> = std::env::var("SHELL")
         .ok()
         .into_iter()
         .chain(["/bin/zsh", "/bin/bash", "/bin/sh"].iter().map(|s| s.to_string()))
         .collect();
 
+    let invocation = format!("command -v {}", cmd);
     for shell in shells {
         if !std::path::Path::new(&shell).exists() {
             continue;
         }
         let output = std::process::Command::new(&shell)
-            .args(["-l", "-c", "command -v yt-dlp"])
+            .args(["-l", "-c", &invocation])
             .output()
             .ok();
         if let Some(out) = output {
@@ -319,7 +354,7 @@ fn detect_system_ytdlp() -> Option<YtDlpCommand> {
     }
 
     #[cfg(not(target_os = "windows"))]
-    if let Some(p) = resolve_via_login_shell() {
+    if let Some(p) = resolve_via_login_shell("yt-dlp") {
         if version_check_sync(&p) {
             return Some(YtDlpCommand::Direct(p));
         }
@@ -353,6 +388,113 @@ fn detect_ytdlp(app: &AppHandle) -> Option<YtDlpCommand> {
         return Some(YtDlpCommand::Sidecar(p));
     }
     detect_system_ytdlp()
+}
+
+/// Resolves a system-installed ffmpeg's directory, ensuring ffprobe sits next to it.
+fn detect_system_ffmpeg() -> Option<PathBuf> {
+    fn check_pair(ffmpeg: &std::path::Path) -> Option<PathBuf> {
+        if !version_check_sync(ffmpeg) {
+            return None;
+        }
+        let dir = ffmpeg.parent()?;
+        let probe_name = if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" };
+        let probe = dir.join(probe_name);
+        if probe.exists() && version_check_sync(&probe) {
+            Some(dir.to_path_buf())
+        } else {
+            None
+        }
+    }
+
+    // PATH
+    let direct: &[&str] = if cfg!(windows) { &["ffmpeg.exe", "ffmpeg"] } else { &["ffmpeg"] };
+    for name in direct {
+        if version_check_cmd_sync(name, &["-version"]) {
+            // We don't know the absolute path — try to resolve it via which/where
+            #[cfg(not(target_os = "windows"))]
+            if let Ok(out) = std::process::Command::new("which").arg(name).output() {
+                if out.status.success() {
+                    if let Ok(s) = String::from_utf8(out.stdout) {
+                        let p = PathBuf::from(s.trim());
+                        if let Some(dir) = check_pair(&p) {
+                            return Some(dir);
+                        }
+                    }
+                }
+            }
+            #[cfg(target_os = "windows")]
+            if let Ok(out) = std::process::Command::new("where").arg(name).output() {
+                if out.status.success() {
+                    if let Ok(s) = String::from_utf8(out.stdout) {
+                        if let Some(line) = s.lines().next() {
+                            let p = PathBuf::from(line.trim());
+                            if let Some(dir) = check_pair(&p) {
+                                return Some(dir);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Known install locations
+    let mut common: Vec<PathBuf> = Vec::new();
+    if cfg!(windows) {
+        common.push(PathBuf::from("C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe"));
+        common.push(PathBuf::from("C:\\ProgramData\\chocolatey\\bin\\ffmpeg.exe"));
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            common.push(PathBuf::from(format!(
+                "{}\\Microsoft\\WindowsApps\\ffmpeg.exe",
+                local
+            )));
+        }
+    } else {
+        common.extend([
+            "/usr/local/bin/ffmpeg",
+            "/usr/bin/ffmpeg",
+            "/opt/homebrew/bin/ffmpeg",
+            "/opt/local/bin/ffmpeg",
+            "/snap/bin/ffmpeg",
+        ].iter().map(PathBuf::from));
+        if let Ok(home) = std::env::var("HOME") {
+            common.push(PathBuf::from(format!("{}/.local/bin/ffmpeg", home)));
+            common.push(PathBuf::from(format!("{}/bin/ffmpeg", home)));
+        }
+    }
+
+    for path in common {
+        if let Some(dir) = check_pair(&path) {
+            return Some(dir);
+        }
+    }
+
+    // Login shell fallback (macOS/Linux GUI apps inherit a stripped PATH)
+    #[cfg(not(target_os = "windows"))]
+    if let Some(p) = resolve_via_login_shell("ffmpeg") {
+        if let Some(dir) = check_pair(&p) {
+            return Some(dir);
+        }
+    }
+
+    None
+}
+
+fn detect_ffmpeg(app: &AppHandle) -> Option<FfmpegLocation> {
+    // 1. System install — preferred (fresher, smaller bundle uses)
+    if let Some(dir) = detect_system_ffmpeg() {
+        return Some(FfmpegLocation::Dir(dir));
+    }
+    // 2. Bundled sidecar — pin yt-dlp to its directory
+    let ffmpeg_sidecar = resolve_named_sidecar(app, "ffmpeg")?;
+    let ffprobe_sidecar = resolve_named_sidecar(app, "ffprobe")?;
+    let dir = ffmpeg_sidecar.parent()?.to_path_buf();
+    // Sanity check: ffprobe is in the same dir
+    if ffprobe_sidecar.parent() == Some(&dir) {
+        Some(FfmpegLocation::Dir(dir))
+    } else {
+        None
+    }
 }
 
 fn emit_progress(
@@ -401,11 +543,16 @@ fn video_format_selector(resolution: &str, codec: &str) -> String {
 
 fn build_command(
     ytdlp: &YtDlpCommand,
+    ffmpeg: Option<&FfmpegLocation>,
     url: &str,
     opts: &DownloadOptions,
     downloads_dir: &str,
 ) -> Command {
     let mut cmd = ytdlp.create();
+
+    if let Some(FfmpegLocation::Dir(dir)) = ffmpeg {
+        cmd.arg("--ffmpeg-location").arg(dir);
+    }
 
     let separator = if cfg!(windows) { "\\" } else { "/" };
     let dir = opts
@@ -557,6 +704,7 @@ fn parse_progress(line: &str) -> Option<ProgressLine> {
 async fn perform_download(
     app: &AppHandle,
     ytdlp: &YtDlpCommand,
+    ffmpeg: Option<&FfmpegLocation>,
     url: &str,
     opts: &DownloadOptions,
 ) -> Result<String, String> {
@@ -564,7 +712,7 @@ async fn perform_download(
 
     emit_progress(app, url, 0.0, "Queued", None, None, None);
 
-    let mut cmd = build_command(ytdlp, url, opts, &downloads_dir);
+    let mut cmd = build_command(ytdlp, ffmpeg, url, opts, &downloads_dir);
     cmd.kill_on_drop(true);
 
     let mut child = cmd
@@ -659,10 +807,11 @@ async fn download_video(
     options: DownloadOptions,
 ) -> Result<String, String> {
     let cmd = state
-        .get()
+        .get_ytdlp()
         .await
         .ok_or_else(|| "yt-dlp is not available".to_string())?;
-    perform_download(&app, &cmd, &url, &options).await
+    let ffmpeg = state.get_ffmpeg().await;
+    perform_download(&app, &cmd, ffmpeg.as_ref(), &url, &options).await
 }
 
 #[tauri::command]
@@ -673,9 +822,10 @@ async fn download_multiple_videos(
     options: DownloadOptions,
 ) -> Result<Vec<String>, String> {
     let cmd = state
-        .get()
+        .get_ytdlp()
         .await
         .ok_or_else(|| "yt-dlp is not available".to_string())?;
+    let ffmpeg = state.get_ffmpeg().await;
 
     let semaphore = Arc::new(Semaphore::new(MAX_PARALLEL_DOWNLOADS));
     let mut handles = Vec::with_capacity(urls.len());
@@ -684,10 +834,14 @@ async fn download_multiple_videos(
         let permit = semaphore.clone().acquire_owned().await.unwrap();
         let app = app.clone();
         let cmd = cmd.clone();
+        let ffmpeg = ffmpeg.clone();
         let opts = options.clone();
         handles.push(tokio::spawn(async move {
             let _permit = permit;
-            (url.clone(), perform_download(&app, &cmd, &url, &opts).await)
+            (
+                url.clone(),
+                perform_download(&app, &cmd, ffmpeg.as_ref(), &url, &opts).await,
+            )
         }));
     }
 
@@ -703,20 +857,29 @@ async fn download_multiple_videos(
     Ok(results)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct YtDlpStatus {
     available: bool,
     source: Option<String>,
+    ffmpeg_available: bool,
+    ffmpeg_source: Option<String>,
+}
+
+async fn build_status(state: &AppState) -> YtDlpStatus {
+    let ytdlp = state.get_ytdlp().await;
+    let ffmpeg = state.get_ffmpeg().await;
+    YtDlpStatus {
+        available: ytdlp.is_some(),
+        source: ytdlp.map(|c| c.label()),
+        ffmpeg_available: ffmpeg.is_some(),
+        ffmpeg_source: ffmpeg.map(|f| f.label()),
+    }
 }
 
 #[tauri::command]
 async fn check_ytdlp_status(state: State<'_, AppState>) -> Result<YtDlpStatus, String> {
-    let cmd = state.get().await;
-    Ok(YtDlpStatus {
-        available: cmd.is_some(),
-        source: cmd.map(|c| c.label()),
-    })
+    Ok(build_status(&state).await)
 }
 
 #[tauri::command]
@@ -724,24 +887,27 @@ async fn redetect_ytdlp(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<YtDlpStatus, String> {
-    let detected = tokio::task::spawn_blocking({
-        let app = app.clone();
-        move || detect_ytdlp(&app)
+    let app_handle = app.clone();
+    let detected = tokio::task::spawn_blocking(move || {
+        let ytdlp = detect_ytdlp(&app_handle);
+        let ffmpeg = detect_ffmpeg(&app_handle);
+        (ytdlp, ffmpeg)
     })
     .await
     .map_err(|e| e.to_string())?;
 
-    let source = detected.as_ref().map(|c| c.label());
-    if let Some(cmd) = detected {
-        state.set(cmd).await;
+    if let Some(cmd) = detected.0 {
+        state.set_ytdlp(cmd).await;
     } else {
         *state.ytdlp.write().await = None;
     }
+    if let Some(loc) = detected.1 {
+        state.set_ffmpeg(loc).await;
+    } else {
+        *state.ffmpeg.write().await = None;
+    }
 
-    Ok(YtDlpStatus {
-        available: source.is_some(),
-        source,
-    })
+    Ok(build_status(&state).await)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -755,11 +921,20 @@ pub fn run() {
             let handle = app.handle().clone();
             let state: State<AppState> = handle.state();
             let ytdlp_state = state.ytdlp.clone();
+            let ffmpeg_state = state.ffmpeg.clone();
             tauri::async_runtime::spawn(async move {
-                let detected =
-                    tokio::task::spawn_blocking(move || detect_ytdlp(&handle)).await.ok().flatten();
-                if let Some(cmd) = detected {
-                    *ytdlp_state.write().await = Some(cmd);
+                let result = tokio::task::spawn_blocking(move || {
+                    (detect_ytdlp(&handle), detect_ffmpeg(&handle))
+                })
+                .await
+                .ok();
+                if let Some((ytdlp, ffmpeg)) = result {
+                    if let Some(cmd) = ytdlp {
+                        *ytdlp_state.write().await = Some(cmd);
+                    }
+                    if let Some(loc) = ffmpeg {
+                        *ffmpeg_state.write().await = Some(loc);
+                    }
                 }
             });
             Ok(())

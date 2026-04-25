@@ -573,12 +573,55 @@
                 class="flex items-start gap-3 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20"
               >
                 <Info class="h-4 w-4 text-emerald-300 shrink-0 mt-0.5" />
-                <div class="text-xs leading-relaxed">
-                  <p class="font-semibold text-emerald-200 mb-0.5">yt-dlp détecté</p>
+                <div class="text-xs leading-relaxed flex-1 min-w-0">
+                  <p class="font-semibold text-emerald-200 mb-0.5">yt-dlp</p>
                   <p class="text-emerald-200/70 break-all">{ytdlpStatus.source}</p>
                 </div>
               </div>
             {/if}
+
+            <div
+              class={[
+                "flex items-start gap-3 p-3 rounded-xl border",
+                ytdlpStatus.ffmpegAvailable
+                  ? "bg-emerald-500/10 border-emerald-500/20"
+                  : "bg-red-500/10 border-red-500/20",
+              ]}
+            >
+              <Info
+                class="h-4 w-4 shrink-0 mt-0.5 {ytdlpStatus.ffmpegAvailable
+                  ? 'text-emerald-300'
+                  : 'text-red-300'}"
+              />
+              <div class="text-xs leading-relaxed flex-1 min-w-0">
+                <p
+                  class={[
+                    "font-semibold mb-0.5",
+                    ytdlpStatus.ffmpegAvailable ? "text-emerald-200" : "text-red-200",
+                  ]}
+                >
+                  ffmpeg + ffprobe
+                </p>
+                {#if ytdlpStatus.ffmpegAvailable}
+                  <p class="text-emerald-200/70 break-all">{ytdlpStatus.ffmpegSource}</p>
+                {:else}
+                  <p class="text-red-200/70">
+                    Non détecté. yt-dlp ne pourra pas extraire l'audio, intégrer thumbnails ni convertir les formats.
+                    Installe ffmpeg via <code class="px-1 py-0.5 rounded bg-white/10">brew install ffmpeg</code>
+                    (macOS), ton gestionnaire de paquets (Linux) ou
+                    <a
+                      href="https://ffmpeg.org/download.html"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="underline hover:text-red-100"
+                    >
+                      ffmpeg.org
+                    </a>
+                    (Windows).
+                  </p>
+                {/if}
+              </div>
+            </div>
           </div>
         {/if}
       {/snippet}

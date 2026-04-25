@@ -13,8 +13,10 @@ dist
 dist-ssr
 *.local
 
-# Bundled yt-dlp binaries (fetched via scripts/fetch-ytdlp.{sh,ps1})
+# Bundled sidecar binaries (fetched via scripts/fetch-binaries.{sh,ps1})
 src-tauri/binaries/yt-dlp*
+src-tauri/binaries/ffmpeg*
+src-tauri/binaries/ffprobe*
 
 # Editor directories and files
 .vscode/*

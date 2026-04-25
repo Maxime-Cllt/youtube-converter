@@ -39,7 +39,12 @@
   let videos = $state<VideoItem[]>([]);
   let isDownloading = $state(false);
   let settingsOpen = $state(false);
-  let ytdlpStatus = $state<YtDlpStatus>({ available: false, source: null });
+  let ytdlpStatus = $state<YtDlpStatus>({
+    available: false,
+    source: null,
+    ffmpegAvailable: false,
+    ffmpegSource: null,
+  });
   let detecting = $state(true);
   let toast = $state<string | null>(null);
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
@@ -87,11 +92,15 @@
     detecting = true;
     try {
       ytdlpStatus = await invoke<YtDlpStatus>("redetect_ytdlp");
-      showToast(
-        ytdlpStatus.available
-          ? `yt-dlp détecté (${ytdlpStatus.source})`
-          : "yt-dlp introuvable",
-      );
+      let msg: string;
+      if (!ytdlpStatus.available) {
+        msg = "yt-dlp introuvable";
+      } else if (!ytdlpStatus.ffmpegAvailable) {
+        msg = "yt-dlp OK · ffmpeg manquant";
+      } else {
+        msg = "yt-dlp + ffmpeg prêts";
+      }
+      showToast(msg);
     } finally {
       detecting = false;
     }
@@ -264,14 +273,24 @@
             <Loader2 class="h-3.5 w-3.5 animate-spin" />
             Détection…
           </span>
-        {:else if ytdlpStatus.available}
+        {:else if ytdlpStatus.available && ytdlpStatus.ffmpegAvailable}
           <span
             class="flex items-center gap-2 text-xs font-medium text-emerald-300 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20"
-            title={ytdlpStatus.source ?? ""}
+            title={`yt-dlp: ${ytdlpStatus.source}\nffmpeg: ${ytdlpStatus.ffmpegSource}`}
           >
             <span class="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.7)]"></span>
-            yt-dlp prêt
+            Tout prêt
           </span>
+        {:else if ytdlpStatus.available && !ytdlpStatus.ffmpegAvailable}
+          <button
+            type="button"
+            onclick={redetect}
+            class="flex items-center gap-2 text-xs font-medium text-amber-300 px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/20 hover:bg-amber-500/20 transition-colors"
+            title="ffmpeg manquant — extraction audio et conversion impossibles"
+          >
+            <AlertCircle class="h-3.5 w-3.5" />
+            ffmpeg manquant
+          </button>
         {:else}
           <button
             type="button"
@@ -282,7 +301,7 @@
             yt-dlp indisponible
           </button>
         {/if}
-        <Button variant="outline" size="icon" onclick={redetect} title="Re-détecter yt-dlp">
+        <Button variant="outline" size="icon" onclick={redetect} title="Re-détecter yt-dlp / ffmpeg">
           {#snippet children()}<RefreshCw class="h-4 w-4 {detecting ? 'animate-spin' : ''}" />{/snippet}
         </Button>
         <Button variant="outline" size="icon" onclick={() => (settingsOpen = true)} title="Paramètres">
@@ -543,7 +562,7 @@
           {options.current.outputDir || "~/Downloads"}
         </span>
       </p>
-      {#if !ytdlpStatus.available && !detecting}
+      {#if !detecting && !ytdlpStatus.available}
         <p class="text-red-400 font-medium flex items-center justify-center gap-1.5">
           <AlertCircle class="h-3.5 w-3.5" />
           yt-dlp introuvable —
@@ -552,6 +571,20 @@
             target="_blank"
             rel="noopener noreferrer"
             class="underline hover:text-red-300 transition-colors inline-flex items-center gap-1"
+          >
+            installer
+            <ExternalLink class="h-3 w-3" />
+          </a>
+        </p>
+      {:else if !detecting && !ytdlpStatus.ffmpegAvailable}
+        <p class="text-amber-400 font-medium flex items-center justify-center gap-1.5">
+          <AlertCircle class="h-3.5 w-3.5" />
+          ffmpeg/ffprobe introuvable — l'extraction audio et la conversion ne fonctionneront pas.
+          <a
+            href="https://ffmpeg.org/download.html"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="underline hover:text-amber-300 transition-colors inline-flex items-center gap-1"
           >
             installer
             <ExternalLink class="h-3 w-3" />

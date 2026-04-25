@@ -111,8 +111,8 @@ jobs:
       - name: Install Frontend Dependencies
         run: bun install --frozen-lockfile
 
-      - name: Fetch yt-dlp sidecar binaries
-        run: bash scripts/fetch-ytdlp.sh
+      - name: Fetch sidecar binaries (yt-dlp + ffmpeg + ffprobe)
+        run: bash scripts/fetch-binaries.sh
 
       - name: Run Rust Unit Tests
         if: needs.changes.outputs.backend == 'true'

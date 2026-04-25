@@ -78,14 +78,14 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
-      - name: Fetch yt-dlp sidecar binaries (Unix)
+      - name: Fetch sidecar binaries (yt-dlp + ffmpeg + ffprobe, Unix)
         if: matrix.platform != 'windows-latest'
-        run: bash scripts/fetch-ytdlp.sh
+        run: bash scripts/fetch-binaries.sh
 
-      - name: Fetch yt-dlp sidecar binaries (Windows)
+      - name: Fetch sidecar binaries (yt-dlp + ffmpeg + ffprobe, Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
-        run: ./scripts/fetch-ytdlp.ps1
+        run: ./scripts/fetch-binaries.ps1
 
       - uses: tauri-apps/tauri-action@v0
         env:
