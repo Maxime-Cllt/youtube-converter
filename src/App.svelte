@@ -31,6 +31,9 @@
   import Progress from "$lib/components/ui/Progress.svelte";
   import SettingsDialog from "$lib/components/SettingsDialog.svelte";
 
+  import { tweened } from "svelte/motion";
+  import { cubicOut } from "svelte/easing";
+
   import { options } from "$lib/stores/options.svelte";
   import { isValidYoutubeUrl, thumbnailFor } from "$lib/utils/youtube";
   import type { DownloadProgress, VideoItem, YtDlpStatus } from "$lib/types";
@@ -60,6 +63,9 @@
   const completedCount = $derived(videos.filter((v) => v.progress >= 100 && !v.error).length);
   const failedCount = $derived(videos.filter((v) => v.error).length);
 
+  const displayProgress = tweened(0, { duration: 500, easing: cubicOut });
+  $effect(() => { displayProgress.set(totalProgress); });
+
   onMount(async () => {
     unlisten = await listen<DownloadProgress>("download-progress", (event) => {
       const { url, progress, status, speed, eta, error } = event.payload;
@@ -79,10 +85,7 @@
   async function refreshStatus() {
     detecting = true;
     try {
-      ytdlpStatus = await invoke<YtDlpStatus>("check_ytdlp_status");
-      if (!ytdlpStatus.available) {
-        ytdlpStatus = await invoke<YtDlpStatus>("redetect_ytdlp");
-      }
+      ytdlpStatus = await invoke<YtDlpStatus>("redetect_ytdlp");
     } finally {
       detecting = false;
     }
@@ -217,10 +220,13 @@
   <div class="fixed inset-0 -z-10 pointer-events-none">
     <div class="absolute inset-0 bg-gradient-to-br from-black via-gray-950 to-black"></div>
     <div
-      class="absolute -top-32 left-1/4 w-[36rem] h-[36rem] bg-red-500/15 rounded-full blur-3xl"
+      class="absolute -top-32 left-1/4 w-[36rem] h-[36rem] bg-red-500/15 rounded-full blur-3xl animate-float"
     ></div>
     <div
-      class="absolute -bottom-32 right-1/4 w-[36rem] h-[36rem] bg-pink-500/10 rounded-full blur-3xl"
+      class="absolute -bottom-32 right-1/4 w-[36rem] h-[36rem] bg-pink-500/10 rounded-full blur-3xl animate-float-reverse"
+    ></div>
+    <div
+      class="absolute top-1/3 right-0 w-[28rem] h-[28rem] bg-violet-500/6 rounded-full blur-3xl animate-[float_11s_ease-in-out_infinite] [animation-delay:-4s]"
     ></div>
     <div
       class="absolute inset-0 opacity-[0.025]"
@@ -249,7 +255,7 @@
         <div>
           <h1 class="text-3xl font-black tracking-tight leading-none">
             <span
-              class="bg-gradient-to-r from-red-400 via-pink-400 to-red-500 bg-clip-text text-transparent"
+              class="bg-gradient-to-r from-red-400 via-pink-400 to-red-500 bg-clip-text text-transparent bg-[length:200%_200%] animate-gradient-x"
             >
               YouTube Converter
             </span>
@@ -278,7 +284,10 @@
             class="flex items-center gap-2 text-xs font-medium text-emerald-300 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20"
             title={`yt-dlp: ${ytdlpStatus.source}\nffmpeg: ${ytdlpStatus.ffmpegSource}`}
           >
-            <span class="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.7)]"></span>
+            <span class="relative flex h-2.5 w-2.5 items-center justify-center">
+              <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60"></span>
+              <span class="relative h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.7)]"></span>
+            </span>
             Tout prêt
           </span>
         {:else if ytdlpStatus.available && !ytdlpStatus.ffmpegAvailable}
@@ -411,7 +420,7 @@
               <div class="mt-2 flex items-center gap-3">
                 <Progress value={totalProgress} class="flex-1 h-1.5" />
                 <span class="text-xs font-bold text-gray-300 tabular-nums w-10 text-right">
-                  {Math.round(totalProgress)}%
+                  {Math.round($displayProgress)}%
                 </span>
               </div>
             {/if}
@@ -430,7 +439,11 @@
                     ? 'border-emerald-500/30'
                     : s === 'error'
                       ? 'border-red-500/30'
-                      : 'border-white/5 hover:border-white/15'}"
+                      : 'border-white/5 hover:border-white/15'} {s === 'downloading'
+                    ? 'animate-glow-blue'
+                    : s === 'converting'
+                      ? 'animate-glow-purple'
+                      : ''}"
                 >
                   <div class="flex gap-4">
                     {#if video.thumbnail}
@@ -494,10 +507,10 @@
                           {/if}
 
                           {#if video.speed}
-                            <span class="text-gray-500 tabular-nums">· {video.speed}</span>
+                            <span class="text-gray-500 tabular-nums animate-fade-in">· {video.speed}</span>
                           {/if}
                           {#if video.eta && s === "downloading"}
-                            <span class="text-gray-500 tabular-nums">· ETA {video.eta}</span>
+                            <span class="text-gray-500 tabular-nums animate-fade-in">· ETA {video.eta}</span>
                           {/if}
                         </div>
 
@@ -521,10 +534,11 @@
               onclick={downloadAll}
               disabled={isDownloading || !ytdlpStatus.available}
               size="lg"
-              class="w-full mt-6"
+              class="w-full mt-6 relative overflow-hidden"
             >
               {#snippet children()}
                 {#if isDownloading}
+                  <span class="absolute inset-0 -translate-x-full animate-shimmer-slide bg-gradient-to-r from-transparent via-white/10 to-transparent pointer-events-none"></span>
                   <Loader2 class="h-5 w-5 animate-spin" />
                   Téléchargement en cours…
                 {:else}
@@ -543,7 +557,7 @@
       >
         <div class="relative inline-block mb-5">
           <div class="absolute inset-0 bg-red-500/20 rounded-full blur-2xl"></div>
-          <div class="relative rounded-2xl bg-white/5 p-5 ring-1 ring-white/10">
+          <div class="relative rounded-2xl bg-white/5 p-5 ring-1 ring-white/10 animate-float">
             <Music class="h-10 w-10 text-gray-500" />
           </div>
         </div>

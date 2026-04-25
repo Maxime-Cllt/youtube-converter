@@ -486,15 +486,22 @@ fn detect_ffmpeg(app: &AppHandle) -> Option<FfmpegLocation> {
         return Some(FfmpegLocation::Dir(dir));
     }
     // 2. Bundled sidecar — pin yt-dlp to its directory
-    let ffmpeg_sidecar = resolve_named_sidecar(app, "ffmpeg")?;
-    let ffprobe_sidecar = resolve_named_sidecar(app, "ffprobe")?;
-    let dir = ffmpeg_sidecar.parent()?.to_path_buf();
-    // Sanity check: ffprobe is in the same dir
-    if ffprobe_sidecar.parent() == Some(&dir) {
-        Some(FfmpegLocation::Dir(dir))
-    } else {
-        None
+    if let (Some(ffmpeg_sidecar), Some(ffprobe_sidecar)) = (
+        resolve_named_sidecar(app, "ffmpeg"),
+        resolve_named_sidecar(app, "ffprobe"),
+    ) {
+        if let Some(dir) = ffmpeg_sidecar.parent().map(|p| p.to_path_buf()) {
+            if ffprobe_sidecar.parent() == Some(dir.as_path()) {
+                return Some(FfmpegLocation::Dir(dir));
+            }
+        }
     }
+    // 3. ffmpeg is reachable on PATH but which/where couldn't resolve its directory
+    //    (e.g. macOS App Sandbox strips PATH). Pass nothing — yt-dlp will find it itself.
+    if version_check_cmd_sync("ffmpeg", &["-version"]) {
+        return Some(FfmpegLocation::SystemPath);
+    }
+    None
 }
 
 fn emit_progress(
@@ -597,7 +604,7 @@ fn build_command(
 
     // Embed
     if opts.add_metadata {
-        cmd.arg("--add-metadata");
+        cmd.arg("--embed-metadata");
     }
     if opts.embed_thumbnail {
         cmd.arg("--embed-thumbnail");
@@ -722,8 +729,6 @@ async fn perform_download(
     let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
     let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
 
-    let app_clone = app.clone();
-    let url_clone = url.to_string();
     let stderr_task = tokio::spawn(async move {
         let mut reader = BufReader::new(stderr).lines();
         let mut last_err = String::new();
@@ -731,17 +736,6 @@ async fn perform_download(
             if line.to_lowercase().contains("error") {
                 last_err = line;
             }
-        }
-        if !last_err.is_empty() {
-            emit_progress(
-                &app_clone,
-                &url_clone,
-                0.0,
-                "Error",
-                None,
-                None,
-                Some(last_err.clone()),
-            );
         }
         last_err
     });
