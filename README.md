@@ -18,8 +18,8 @@
 ---
 
 <div align="center" style="margin-top: 20px">
-  <img src="assets/app.png" alt="Youtube-converter" height="250px" width="500px" />
-  <img src="assets/app2.png" alt="Youtube-converter" height="250px"width="250px" />
+  <img src="assets/app2.png" alt="Youtube-converter" height="250px" width="500px" />
+  <img src="assets/app.png" alt="Youtube-converter" height="250px"width="250px" />
 </div>
 
 ---
