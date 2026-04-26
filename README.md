@@ -4,15 +4,15 @@
 
 <div align="center">
   <h1>🎵 YouTube Converter</h1>
-  <p><i>Convert YouTube videos to high-quality audio files with ease</i></p>
+  <p><i>Download YouTube videos as MP3 or video — locally, privately, instantly</i></p>
 </div>
 
 <div align="center">
-    <img src="https://img.shields.io/badge/Rust-dea584?style=for-the-badge&logo=rust&logoColor=white" alt="Rust" />
+  <img src="https://img.shields.io/badge/Rust-dea584?style=for-the-badge&logo=rust&logoColor=white" alt="Rust" />
   <img src="https://img.shields.io/badge/Tauri-FFC131?style=for-the-badge&logo=tauri&logoColor=white" alt="Tauri" />
   <img src="https://img.shields.io/badge/TypeScript-3178C6?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/React-61DAFB?style=for-the-badge&logo=react&logoColor=black" alt="React" />
-    <img src="https://img.shields.io/badge/Version-1.0.0-7073f6?style=for-the-badge" alt="Version" />
+  <img src="https://img.shields.io/badge/Svelte-FF3E00?style=for-the-badge&logo=svelte&logoColor=white" alt="Svelte" />
+  <img src="https://img.shields.io/badge/Version-0.3.0-7073f6?style=for-the-badge" alt="Version" />
 </div>
 
 ---
@@ -26,44 +26,52 @@
 
 ## 📖 Overview
 
-**YouTube Converter** is a modern, cross-platform desktop application built with Rust and Tauri that allows you to
-download and convert YouTube videos to high-quality audio files. With a sleek interface and powerful backend, it
-provides a seamless experience for music enthusiasts and content creators.
+**YouTube Converter** is a modern, cross-platform desktop application built with Rust and Tauri. It lets you download YouTube videos as high-quality audio (MP3, M4A, FLAC…) or video (MP4, MKV…) directly on your machine — no cloud, no tracking, no limits.
 
 ### 🎯 Why YouTube Converter?
 
-- **🚀 Lightning Fast**: Built with Rust for maximum performance and minimal resource usage
-- **🎨 Modern UI**: Clean, intuitive interface built with React and TailwindCSS
-- **🔒 Privacy First**: All processing happens locally on your machine
-- **🎵 High Quality**: Supports multiple audio formats with customizable quality settings
-- **📦 Batch Downloads**: Download multiple videos simultaneously
-- **🖼️ Rich Metadata**: Automatically embeds thumbnails and metadata into audio files
-- **⚡ Real-time Progress**: Live progress tracking for all downloads
+- **🚀 Lightning Fast**: Rust backend with async Tokio runtime and parallel downloads
+- **🎨 Modern UI**: Animated interface built with Svelte 5 and TailwindCSS
+- **🔒 Privacy First**: Everything runs locally — yt-dlp processes files on your machine
+- **🎵 Audio & Video**: MP3/M4A/FLAC extraction or full video download with codec/resolution control
+- **📦 Batch Downloads**: Queue multiple URLs and download up to 3 in parallel
+- **🖼️ Rich Metadata**: Embeds thumbnails, metadata, chapters, and subtitles
+- **⚡ Real-time Progress**: Live per-video progress, speed, and ETA
+- **🧹 SponsorBlock**: Automatically remove sponsors, intros, and outros
 
 ---
 
 ## ✨ Key Features
 
-### Audio Conversion
+### Audio Mode
 
-- **Multiple Formats**: MP3, M4A, FLAC, WAV, and more
-- **Quality Control**: Choose from 0 (best) to 9 (worst) quality settings
-- **Metadata Embedding**: Automatic artist, title, and album information
-- **Thumbnail Support**: Embed video thumbnails as album art
+- **Multiple Formats**: MP3, M4A, FLAC, WAV, OPUS, and more
+- **Quality Control**: VBR quality from 0 (best) to 9 (worst)
+- **Metadata & Thumbnail**: Embeds title, artist, album art automatically
+- **Chapter Support**: Embed chapter markers into the output file
 
-### User Experience
+### Video Mode
 
-- **Batch Processing**: Queue multiple videos for download
-- **Custom Output**: Flexible file naming templates
-- **Progress Tracking**: Real-time download and conversion status
-- **Error Handling**: Graceful error recovery with detailed feedback
+- **Resolution Control**: Best, 4K, 1440p, 1080p, 720p, 480p, 360p
+- **Codec Selector**: H.264, H.265, VP9, AV1, or any
+- **Container**: MP4, MKV, WebM, or default
+- **Subtitle Embedding**: Download and embed subtitles in chosen languages
+
+### Advanced Settings
+
+- **SponsorBlock**: Remove sponsor segments, intros, outros, self-promos
+- **Network Options**: Rate limiting, proxy, custom User-Agent, cookies file
+- **Playlist Support**: Download full playlists or specific items by index
+- **Custom yt-dlp Args**: Pass arbitrary extra arguments for power users
+- **Output Template**: Flexible yt-dlp naming templates (`%(title)s.%(ext)s`, etc.)
 
 ### Technical Excellence
 
 - **Cross-Platform**: Native support for macOS, Windows, and Linux
 - **Memory Safe**: Built with Rust's zero-cost abstractions
-- **Async Operations**: Non-blocking downloads with Tokio runtime
-- **Unit Tested**: Comprehensive test suite with 9 passing tests
+- **Async Operations**: Non-blocking downloads with Tokio — up to 3 concurrent
+- **Auto-detection**: Finds yt-dlp and ffmpeg on PATH, common install locations, login shell, and Python module fallback
+- **Unit Tested**: Rust test suite covering progress parsing, format selectors, and option deserialization
 
 ---
 
@@ -96,14 +104,16 @@ Before you begin, ensure you have the following installed:
 
 ### Required
 
-- **[Node.js](https://nodejs.org/)** (v16 or higher)
-- **[pnpm](https://pnpm.io/)** - Fast, disk space efficient package manager
+- **[Bun](https://bun.sh/)** (v1.1 or higher) — JavaScript runtime and package manager
 - **[Rust](https://rustup.rs/)** (latest stable version)
-- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** - YouTube download engine
+- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** — YouTube download engine
+- **[ffmpeg](https://ffmpeg.org/)** + **ffprobe** — Required for audio extraction and conversion
+
+> The app auto-detects yt-dlp and ffmpeg at startup. It searches the system PATH, common install locations, and falls back to a login shell lookup for GUI apps on macOS.
 
 ### Installing yt-dlp
 
-**macOS (Homebrew)**
+**macOS / Linux (Homebrew)**
 
 ```bash
 brew install yt-dlp
@@ -112,10 +122,7 @@ brew install yt-dlp
 **Linux**
 
 ```bash
-# Using pip
-pip install yt-dlp
-
-# Or download binary
+# Download binary directly
 sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
 sudo chmod a+rx /usr/local/bin/yt-dlp
 ```
@@ -128,6 +135,27 @@ winget install yt-dlp
 
 # Or using scoop
 scoop install yt-dlp
+```
+
+### Installing ffmpeg
+
+**macOS / Linux (Homebrew)**
+
+```bash
+brew install ffmpeg
+```
+
+**Linux (apt)**
+
+```bash
+sudo apt install ffmpeg
+```
+
+**Windows**
+
+```powershell
+winget install ffmpeg
+# or: scoop install ffmpeg
 ```
 
 ---
@@ -144,19 +172,19 @@ cd youtube-converter
 ### 2. Install Dependencies
 
 ```bash
-pnpm install
+bun install
 ```
 
 ### 3. Run in Development Mode
 
 ```bash
-pnpm tauri dev
+bun tauri dev
 ```
 
 ### 4. Build for Production
 
 ```bash
-pnpm tauri build
+bun tauri build
 ```
 
 The built application will be available in `src-tauri/target/release/`.
@@ -192,32 +220,36 @@ cargo test test_get_downloads_dir_returns_valid_path
 
 ### Basic Download
 
-1. Launch the application
-2. Paste a YouTube URL
-3. Select your desired audio format and quality
-4. Click "Download"
-5. Find your file in the Downloads folder
+1. Launch the application — yt-dlp and ffmpeg are detected automatically
+2. Paste one or more YouTube URLs (space, comma, or line-separated)
+3. Open **Settings** to choose audio or video mode and configure options
+4. Click **Download**
+5. Files are saved to `~/Downloads` by default (configurable in Settings)
 
-### Advanced Options
-
-**Custom Output Template**
+### Output Template Examples
 
 ```
-%(title)s.%(ext)s           # Video title + extension
-%(artist)s - %(title)s      # Artist - Title format
-%(playlist)s/%(title)s      # Organize by playlist
+%(title)s.%(ext)s             # Default: video title + extension
+%(artist)s - %(title)s        # Artist - Title (from metadata)
+%(playlist)s/%(title)s        # Organise by playlist name
+%(upload_date)s - %(title)s   # Date prefix
 ```
 
-**Quality Settings**
+### Audio Quality Settings
 
-- `0` - Best quality (largest file size)
-- `5` - Balanced (recommended)
-- `9` - Smallest size (lower quality)
+- `0` — Best quality / highest bitrate (default)
+- `5` — Balanced
+- `9` — Smallest file size
 
-**Metadata Options**
+### SponsorBlock Categories
 
-- ☑️ **Embed Thumbnail**: Add video thumbnail as album art
-- ☑️ **Add Metadata**: Include artist, title, album info
+| Category | Description |
+|----------|-------------|
+| `sponsor` | Paid promotions and sponsors |
+| `intro` | Intros and outros |
+| `selfpromo` | Self-promotion segments |
+| `interaction` | Like/subscribe reminders |
+| `music_offtopic` | Non-music sections in music videos |
 
 ---
 
@@ -225,17 +257,19 @@ cargo test test_get_downloads_dir_returns_valid_path
 
 ### Backend (Rust)
 
-- **[Tauri](https://tauri.app/)** - Desktop app framework
-- **[Tokio](https://tokio.rs/)** - Async runtime
-- **[Serde](https://serde.rs/)** - Serialization framework
-- **yt-dlp** - Video download engine
+- **[Tauri v2](https://tauri.app/)** — Desktop app framework
+- **[Tokio](https://tokio.rs/)** — Async runtime (parallel downloads via semaphore)
+- **[Serde](https://serde.rs/)** — JSON serialization for IPC
+- **yt-dlp** — Video download and extraction engine
+- **ffmpeg** — Audio conversion and post-processing
 
-### Frontend (TypeScript/React)
+### Frontend (TypeScript/Svelte)
 
-- **[React](https://react.dev/)** - UI framework
-- **[TypeScript](https://www.typescriptlang.org/)** - Type safety
-- **[TailwindCSS](https://tailwindcss.com/)** - Utility-first CSS
-- **[Vite](https://vitejs.dev/)** - Build tool
+- **[Svelte 5](https://svelte.dev/)** — Reactive UI with runes (`$state`, `$derived`, `$effect`)
+- **[TypeScript](https://www.typescriptlang.org/)** — Type safety
+- **[TailwindCSS](https://tailwindcss.com/)** — Utility-first CSS with custom animations
+- **[Vite](https://vitejs.dev/)** — Build tool
+- **[Lucide Svelte](https://lucide.dev/)** — Icon library
 
 ---
 
@@ -244,23 +278,19 @@ cargo test test_get_downloads_dir_returns_valid_path
 ### Development Build
 
 ```bash
-# Install dependencies
-pnpm install
-
-# Run in dev mode
-pnpm tauri dev
+bun install
+bun tauri dev
 ```
 
 ### Production Build
 
 ```bash
-# Build for your platform
-pnpm tauri build
+bun tauri build
 
 # Output locations:
-# macOS: src-tauri/target/release/bundle/dmg/
+# macOS:   src-tauri/target/release/bundle/dmg/
 # Windows: src-tauri/target/release/bundle/msi/
-# Linux: src-tauri/target/release/bundle/appimage/
+# Linux:   src-tauri/target/release/bundle/appimage/
 ```
 
 ---
@@ -295,8 +325,8 @@ Contributions are welcome! Here's how you can help:
 ### Code Style
 
 - Rust: Follow [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/)
-- TypeScript/React: Follow [Airbnb Style Guide](https://github.com/airbnb/javascript)
+- TypeScript/Svelte: consistent with existing code style
 - Run `cargo fmt` before committing Rust code
-- Run `pnpm lint` before committing frontend code
+- Run `bun check` to verify Svelte TypeScript before committing
 
 ---

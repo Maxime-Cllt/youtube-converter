@@ -6,11 +6,17 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+bun-debug.log*
 
 node_modules
 dist
 dist-ssr
 *.local
+
+# Bundled sidecar binaries (fetched via scripts/fetch-binaries.{sh,ps1})
+src-tauri/binaries/yt-dlp*
+src-tauri/binaries/ffmpeg*
+src-tauri/binaries/ffprobe*
 
 # Editor directories and files
 .vscode/*

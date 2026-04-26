@@ -131,8 +131,8 @@ jobs:
               sudo apt-get update && sudo apt-get install -y jq
             fi
           
-            # Update version in tauri.conf.json
-            jq --arg version "$VERSION" '.package.version = $version' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp
+            # Update version in tauri.conf.json (Tauri v2 has version at top level)
+            jq --arg version "$VERSION" '.version = $version' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp
             mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
           
             echo "✅ Updated tauri.conf.json version"
